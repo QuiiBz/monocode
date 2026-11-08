@@ -118,7 +118,7 @@ impl Conversation {
                 });
                 let (history, turns) = qualified
                     .as_ref()
-                    .map(monocode_core::store::Store::project_remote_history)
+                    .map(|snapshot| remote.project_history(snapshot))
                     .transpose()?
                     .unwrap_or_default();
                 Some((

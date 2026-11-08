@@ -94,6 +94,7 @@ pub(super) struct Pending {
     pub session: String,
     pub wire: String,
     pub form: Option<Value>,
+    pub question: Option<Question>,
 }
 pub(super) struct State {
     pub protocol: Protocol,
@@ -468,6 +469,7 @@ impl State {
                                 session: session.clone(),
                                 wire: id.into(),
                                 form: None,
+                                question: None,
                             },
                         );
                         events.push(Event::Approval(Approval {
@@ -498,6 +500,7 @@ impl State {
                             session: session.clone(),
                             wire: id.into(),
                             form,
+                            question: Some(question.clone()),
                         },
                     );
                     if interactive {
@@ -735,6 +738,10 @@ impl State {
             return Ok(Vec::new());
         }
         if let Some(pending) = self.questions.remove(&control.id) {
+            let text = match (&pending.question, &control.decision) {
+                (Some(question), Decision::Answer(answers)) => question.answer_text(answers),
+                _ => String::new(),
+            };
             let answers = if let Decision::Answer(answers) = control.decision {
                 Some(answers)
             } else {
@@ -808,7 +815,12 @@ impl State {
             } else {
                 client.request("POST", &format!("{base}/reject"), Some(json!({})))?;
             }
-            return Ok(vec![Event::QuestionResolved(control.id)]);
+            let mut events = Vec::new();
+            if !text.is_empty() {
+                events.push(Event::QuestionAnswered(text));
+            }
+            events.push(Event::QuestionResolved(control.id));
+            return Ok(events);
         }
         Ok(Vec::new())
     }
@@ -918,4 +930,111 @@ pub(super) fn error_message(value: &Value) -> String {
         .or_else(|| value["error"]["message"].as_str())
         .unwrap_or("OpenCode session failed.")
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::BufReader, net::TcpListener};
+
+    #[test]
+    fn question_and_form_answers_emit_visible_labels_after_http_success() {
+        for (version_two, status, decision) in [
+            (
+                false,
+                200,
+                Decision::Answer(vec![vec!["Visible label".into(), "Typed answer".into()]]),
+            ),
+            (
+                true,
+                200,
+                Decision::Answer(vec![vec!["Visible label".into(), "Typed answer".into()]]),
+            ),
+            (true, 200, Decision::Deny),
+            (
+                false,
+                500,
+                Decision::Answer(vec![vec!["Visible label".into()]]),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client = Client::new(
+                format!("http://{}", listener.local_addr().unwrap()),
+                String::new(),
+                version_two,
+                None,
+            );
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+                body
+            });
+            let request = Request {
+                kind: Kind::OpenCode,
+                binary: "unused".into(),
+                cwd: "/tmp".into(),
+                prompt: String::new(),
+                provider_id: None,
+                model: None,
+                settings: Settings::default(),
+            };
+            let mut state = State::new(request, "session".into(), false);
+            let raw = if version_two {
+                json!({"id":"request","sessionID":"session","fields":[{"key":"q","title":"Choose","type":"multiselect","custom":true,"options":[{"value":"opaque-id","label":"Visible label"}]}]})
+            } else {
+                json!({"id":"request","sessionID":"session","questions":[{"id":"q","question":"Choose","multiple":true,"options":[{"label":"Visible label"}]}]})
+            };
+            let events = state.frame(&client, json!({"type":if version_two {"form.created"} else {"question.asked"},"properties":raw}), true).unwrap();
+            let Event::Question(question) = &events[0] else {
+                panic!("expected question")
+            };
+            let answered = matches!(decision, Decision::Answer(_));
+            let result = state.respond(
+                &client,
+                Control {
+                    id: question.id.clone(),
+                    decision,
+                },
+            );
+            let body = server.join().unwrap();
+            if status != 200 {
+                assert!(result.is_err());
+                continue;
+            }
+            let events = result.unwrap();
+            if answered {
+                assert_eq!(
+                    events[0],
+                    Event::QuestionAnswered("Choose\nVisible label\nTyped answer".into())
+                );
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                if version_two {
+                    assert_eq!(body["answer"]["q"], json!(["opaque-id", "Typed answer"]));
+                } else {
+                    assert_eq!(body["answers"], json!([["Visible label", "Typed answer"]]));
+                }
+            } else {
+                assert_eq!(events, vec![Event::QuestionResolved(question.id.clone())]);
+            }
+        }
+    }
 }

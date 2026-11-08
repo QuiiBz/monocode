@@ -91,6 +91,7 @@ pub enum Event {
     Approval(Approval),
     ApprovalResolved(String),
     Question(crate::agent::Question),
+    QuestionAnswered(String),
     QuestionResolved(String),
     BeginAssistant,
     Text(String),
@@ -289,7 +290,7 @@ struct Protocol {
     question_order: std::collections::VecDeque<String>,
     visible_question: Option<String>,
     async_question_items: std::collections::HashSet<String>,
-    async_answers: HashMap<String, (Value, String, Value, crate::agent::Question)>,
+    async_answers: HashMap<String, (Value, String, Value, crate::agent::Question, String)>,
 }
 impl Protocol {
     fn new(request: Request) -> Self {
@@ -367,7 +368,7 @@ impl Protocol {
                 return Ok(Vec::new());
             }
             if let Some(id) = v["id"].as_str() {
-                if let Some((wire, kind, request, question)) = self.async_answers.remove(id) {
+                if let Some((wire, kind, request, question, text)) = self.async_answers.remove(id) {
                     if let Some(error) = v.get("error").filter(|e| !e.is_null()) {
                         let message = codex_error(error, "Could not send your answer to Codex");
                         self.questions
@@ -375,7 +376,10 @@ impl Protocol {
                         self.visible_question = Some(question.id.clone());
                         return Ok(vec![Event::Status(message), Event::Question(question)]);
                     }
-                    return Ok(vec![Event::QuestionResolved(question.id)]);
+                    return Ok(vec![
+                        Event::QuestionAnswered(text),
+                        Event::QuestionResolved(question.id),
+                    ]);
                 }
                 if id.starts_with("native-answer-") || id.starts_with("native-interrupt-") {
                     return Ok(Vec::new());
@@ -1108,14 +1112,7 @@ impl Protocol {
             }
             if kind == "codex-async" {
                 if let Decision::Answer(answers) = &control.decision {
-                    let text = question
-                        .items
-                        .iter()
-                        .zip(answers)
-                        .filter(|(_, a)| !a.is_empty())
-                        .map(|(q, a)| format!("{}\n{}", q.prompt, a.join("\n")))
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
+                    let text = question.answer_text(answers);
                     if !text.is_empty() && request["turnId"].as_str() == self.active_turn.as_deref()
                     {
                         question.auto_resolve_at = None;
@@ -1125,7 +1122,7 @@ impl Protocol {
                             json!({"id":id,"method":"turn/steer","params":{"threadId":request["threadId"],"expectedTurnId":request["turnId"],"input":[{"type":"text","text":text}]}}),
                         )?;
                         self.async_answers
-                            .insert(id, (wire, kind, request, question));
+                            .insert(id, (wire, kind, request, question, text));
                     }
                 }
                 return Ok(());
@@ -1669,7 +1666,7 @@ fn run_operation(
                                 Err(error) => pending.push(Event::FollowUpFailed { id, error }),
                             }
                         } else {
-                            protocol.respond(control, &mut stdin)?;
+                            pending.extend(protocol.respond_with_answer(control, &mut stdin)?);
                         }
                     }
                 }

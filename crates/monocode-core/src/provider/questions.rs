@@ -2,6 +2,27 @@
 use super::*;
 use crate::agent::{Question, QuestionItem, QuestionOption};
 impl Protocol {
+    pub(super) fn respond_with_answer(
+        &mut self,
+        control: Control,
+        stdin: &mut impl Write,
+    ) -> Result<Vec<Event>, String> {
+        let text = self
+            .questions
+            .get(&control.id)
+            .and_then(|(_, kind, _, question)| {
+                if kind != "codex-async" {
+                    if let Decision::Answer(answers) = &control.decision {
+                        let text = question.answer_text(answers);
+                        return (!text.is_empty()).then_some(text);
+                    }
+                }
+                None
+            });
+        self.respond(control, stdin)?;
+        Ok(text.into_iter().map(Event::QuestionAnswered).collect())
+    }
+
     pub(super) fn question(
         &mut self,
         wire: Value,
@@ -338,20 +359,157 @@ mod tests {
             settings: Default::default(),
         })
     }
-    fn answer(p: &mut Protocol, event: &Event, answers: Vec<Vec<String>>) -> Value {
+    fn answer(
+        protocol: &mut Protocol,
+        event: &Event,
+        answers: Vec<Vec<String>>,
+        expected_text: &str,
+    ) -> Value {
         let Event::Question(question) = event else {
             panic!("expected question")
         };
         let mut out = Vec::new();
-        p.respond(
-            Control {
-                id: question.id.clone(),
-                decision: Decision::Answer(answers),
-            },
-            &mut out,
-        )
-        .unwrap();
+        let events = protocol
+            .respond_with_answer(
+                Control {
+                    id: question.id.clone(),
+                    decision: Decision::Answer(answers),
+                },
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(events, vec![Event::QuestionAnswered(expected_text.into())]);
         serde_json::from_slice(&out).unwrap()
+    }
+    #[test]
+    fn structured_answers_keep_question_order_and_omit_skipped_items() {
+        let mut protocol = protocol(Kind::Codex);
+        let events = protocol.frame(json!({"id":"request","method":"item/tool/requestUserInput","params":{"questions":[
+            {"id":"skip","question":"Skip this?"},
+            {"id":"choice","question":"Choose several","options":[{"label":"A"},{"label":"B"}],"multiSelect":true},
+            {"id":"text","question":"Details?"}
+        ]}}), &mut Vec::new()).unwrap();
+        let response = answer(
+            &mut protocol,
+            &events[0],
+            vec![
+                vec![],
+                vec!["A".into(), "B".into()],
+                vec!["Custom 🙂\nSecond line".into()],
+            ],
+            "Choose several\nA\nB\n\nDetails?\nCustom 🙂\nSecond line",
+        );
+        assert!(response["result"]["answers"].get("skip").is_none());
+        assert_eq!(
+            response["result"]["answers"]["text"]["answers"],
+            json!(["Custom 🙂\nSecond line"])
+        );
+    }
+
+    #[test]
+    fn skipped_empty_stale_and_kept_open_questions_do_not_record_answers() {
+        for decision in [
+            Decision::Deny,
+            Decision::KeepOpen,
+            Decision::Answer(vec![vec![]]),
+        ] {
+            let mut protocol = protocol(Kind::Codex);
+            protocol.frame(json!({"id":"request","method":"item/tool/requestUserInput","params":{"questions":[{"id":"q","question":"Choose"}]}}), &mut Vec::new()).unwrap();
+            let events = protocol
+                .respond_with_answer(
+                    Control {
+                        id: json!("request").to_string(),
+                        decision,
+                    },
+                    &mut Vec::new(),
+                )
+                .unwrap();
+            assert!(events.is_empty());
+        }
+        let events = protocol(Kind::Codex)
+            .respond_with_answer(
+                Control {
+                    id: "stale".into(),
+                    decision: Decision::Answer(vec![vec!["answer".into()]]),
+                },
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn failed_question_writes_do_not_record_answers() {
+        struct FailedWriter;
+        impl Write for FailedWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("Disconnected"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut protocol = protocol(Kind::Codex);
+        protocol.frame(json!({"id":"request","method":"item/tool/requestUserInput","params":{"questions":[{"id":"q","question":"Choose"}]}}), &mut Vec::new()).unwrap();
+        assert!(protocol
+            .respond_with_answer(
+                Control {
+                    id: json!("request").to_string(),
+                    decision: Decision::Answer(vec![vec!["answer".into()]])
+                },
+                &mut FailedWriter
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn async_answers_are_recorded_once_after_acceptance_and_can_retry_rejection() {
+        let mut protocol = protocol(Kind::Codex);
+        protocol.request.provider_id = Some("thread".into());
+        protocol.active_turn = Some("turn".into());
+        let mut events = Vec::new();
+        protocol.codex_async_questions(&json!({"params":{"item":{"id":"async","type":"agentMessage","delivery":"async","questions":[{"title":"Choose","options":["A","B"]}]}}}), &mut events, &mut Vec::new()).unwrap();
+        let Event::Question(question) = &events[0] else {
+            panic!("expected question")
+        };
+        let question_id = question.id.clone();
+        for accepted in [false, true] {
+            let mut output = Vec::new();
+            let events = protocol
+                .respond_with_answer(
+                    Control {
+                        id: question_id.clone(),
+                        decision: Decision::Answer(vec![vec!["B".into()]]),
+                    },
+                    &mut output,
+                )
+                .unwrap();
+            assert!(events.is_empty());
+            let request: Value = serde_json::from_slice(&output).unwrap();
+            let receipt = if accepted {
+                json!({"id":request["id"],"result":{}})
+            } else {
+                json!({"id":request["id"],"error":{"message":"Try again"}})
+            };
+            let events = protocol.frame(receipt.clone(), &mut Vec::new()).unwrap();
+            if accepted {
+                assert_eq!(
+                    events,
+                    vec![
+                        Event::QuestionAnswered("Choose\nB".into()),
+                        Event::QuestionResolved(question_id.clone())
+                    ]
+                );
+                assert!(protocol.frame(receipt, &mut Vec::new()).unwrap().is_empty());
+            } else {
+                assert!(events
+                    .iter()
+                    .any(|event| matches!(event, Event::Question(_))));
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, Event::QuestionAnswered(_))));
+            }
+        }
     }
     #[test]
     fn codex_questions_wait_for_answers_and_reply_by_question_id() {
@@ -359,7 +517,7 @@ mod tests {
         let mut out = Vec::new();
         let events = p.frame(json!({"id":"request","method":"item/tool/requestUserInput","params":{"questions":[{"id":"q","question":"Choose","options":[{"label":"A"},{"label":"B"}]}]}}),&mut out).unwrap();
         assert!(out.is_empty());
-        let response = answer(&mut p, &events[0], vec![vec!["B".into()]]);
+        let response = answer(&mut p, &events[0], vec![vec!["B".into()]], "Choose\nB");
         assert_eq!(response["result"]["answers"]["q"]["answers"], json!(["B"]));
         assert!(p.questions.is_empty());
     }
@@ -371,7 +529,7 @@ mod tests {
         ] {
             let mut p = protocol(kind);
             let events = p.frame(json!({"id":99,"method":method,"params":{"questions":[{"id":"q","question":"Choose","options":[{"id":"opaque","label":"A"}]}]}}),&mut Vec::new()).unwrap();
-            let response = answer(&mut p, &events[0], vec![vec!["A".into()]]);
+            let response = answer(&mut p, &events[0], vec![vec!["A".into()]], "Choose\nA");
             if kind == Kind::Cursor {
                 assert_eq!(
                     response["result"]["outcome"]["answers"][0]["selectedOptionIds"],
@@ -386,7 +544,12 @@ mod tests {
     fn claude_questions_return_the_original_input_and_typed_answers() {
         let mut p = protocol(Kind::Claude);
         let events = p.frame(json!({"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Name?","options":[]}]}}}),&mut Vec::new()).unwrap();
-        let response = answer(&mut p, &events[0], vec![vec!["Native".into()]]);
+        let response = answer(
+            &mut p,
+            &events[0],
+            vec![vec!["Native".into()]],
+            "Name?\nNative",
+        );
         assert_eq!(
             response["response"]["response"]["updatedInput"]["answers"]["Name?"],
             "Native"
@@ -397,14 +560,23 @@ mod tests {
         );
     }
     #[test]
-    fn omp_extension_questions_and_skips_resolve_the_provider_request() {
-        let mut p = protocol(Kind::Omp);
-        let events = p.frame(json!({"type":"extension_ui_request","id":"r","method":"select","title":"Which?","options":["First","Second"]}),&mut Vec::new()).unwrap();
-        let response = answer(&mut p, &events[0], vec![vec!["Second".into()]]);
-        assert_eq!(
-            response,
-            json!({"type":"extension_ui_response","id":"r","value":"Second"})
-        );
+    fn pi_and_omp_select_input_and_editor_answers_are_recorded() {
+        for kind in [Kind::Pi, Kind::Omp] {
+            for method in ["select", "input", "editor"] {
+                let mut protocol = protocol(kind);
+                let events = protocol.frame(json!({"type":"extension_ui_request","id":"r","method":method,"title":"Which?","options":["First","Second"]}),&mut Vec::new()).unwrap();
+                let response = answer(
+                    &mut protocol,
+                    &events[0],
+                    vec![vec!["Second".into()]],
+                    "Which?\nSecond",
+                );
+                assert_eq!(
+                    response,
+                    json!({"type":"extension_ui_response","id":"r","value":"Second"})
+                );
+            }
+        }
     }
     #[test]
     fn secret_and_duplicate_questions_are_rejected() {

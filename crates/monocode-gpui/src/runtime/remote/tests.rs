@@ -232,6 +232,144 @@ fn mismatched_receipt_never_commits_a_session_or_discards_pending_command() {
 }
 
 #[test]
+fn question_answers_survive_lost_receipts_without_sending_native_metadata() {
+    let directory = Directory::new();
+    let store = directory.store();
+    let mut binding = binding(&store);
+    binding.session_id = Some("host-session".into());
+    let answer = json!({"after":"u","block":{"id":"native-answer-retry","role":"user","text":"Choose\nB","sentAt":123}});
+    binding.outbox.push(json!({"type":"answer","commandId":"retry","sessionId":"host-session","requestId":7,"reply":{"kind":"answered","answers":{"q":["b"]}},"nativeAnswer":answer}));
+    journal(&store, &binding).unwrap();
+    let mut lost = true;
+    let host = Host::new(move |request| {
+        assert_eq!(request["method"], "commands.dispatch");
+        assert!(request["params"].get("nativeAnswer").is_none());
+        if lost {
+            lost = false;
+            None
+        } else {
+            Some(receipt(&request["params"]))
+        }
+    });
+    assert!(dispatch_outbox(&host.client, &host.machine.id, &store, &mut binding).is_err());
+    assert!(binding.question_answers.is_empty());
+    let mut restored = locked(&store)
+        .unwrap()
+        .remote_session(binding.summary.id)
+        .unwrap()
+        .unwrap();
+    dispatch_outbox(&host.client, &host.machine.id, &store, &mut restored).unwrap();
+    assert_eq!(restored.question_answers, vec![answer]);
+    dispatch_outbox(&host.client, &host.machine.id, &store, &mut restored).unwrap();
+    assert_eq!(restored.question_answers.len(), 1);
+    let store = locked(&store).unwrap();
+    store
+        .register_remote_summary(&restored.project, &snapshot("idle", 2))
+        .unwrap();
+    let restored = store.remote_session(restored.summary.id).unwrap().unwrap();
+    let (history, _) = restored.project_history(&snapshot("idle", 2)).unwrap();
+    assert_eq!(history.rows.last().unwrap().text, "Choose\nB");
+    assert_eq!(history.rows.last().unwrap().sent_at, Some(123));
+}
+
+#[test]
+fn native_remote_answers_appear_between_the_question_and_later_output() {
+    let directory = Directory::new();
+    let store = directory.store();
+    let mut binding = binding(&store);
+    binding.session_id = Some("host-session".into());
+    journal(&store, &binding).unwrap();
+    let mut answered = false;
+    let host = Host::new(move |request| {
+        if request["method"] == "commands.dispatch" {
+            let command = &request["params"];
+            assert_eq!(command["type"], "answer");
+            assert_eq!(command["reply"]["answers"]["q"], json!(["stable-id"]));
+            assert_eq!(command["reply"]["custom"]["q"], "Typed answer");
+            assert!(command.get("nativeAnswer").is_none());
+            answered = true;
+            return Some(receipt(command));
+        }
+        let mut value = snapshot(
+            if answered { "idle" } else { "running" },
+            if answered { 2 } else { 1 },
+        );
+        if answered {
+            value["session"]["blocks"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"after","role":"assistant","text":"After"}));
+        } else {
+            value["session"]["pendingQuestion"] = json!({"requestId":7,"questions":[{"id":"q","prompt":"Choose","multiSelect":true,"allowCustom":true,"options":[{"id":"stable-id","label":"Visible label"}]}]});
+        }
+        Some(json!({"kind":"snapshot","value":value}))
+    });
+    let client = host.client.clone();
+    let summary = binding.summary.clone();
+    let worker_store = store.clone();
+    let (updates, receive_updates) = async_channel::unbounded();
+    let (controls, control_rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        run_with_client(
+            client,
+            summary,
+            String::new(),
+            Settings {
+                remote_action: Some(json!({"type":"attach"})),
+                ..Default::default()
+            },
+            control_rx,
+            worker_store,
+            Arc::new(AtomicBool::new(false)),
+            updates,
+        )
+    });
+    let mut rows = Vec::new();
+    loop {
+        let update = receive(&receive_updates);
+        rows.truncate(update.start);
+        rows.extend(update.rows);
+        for question in update.questions {
+            controls
+                .send(Control {
+                    id: question.id,
+                    decision: Decision::Answer(vec![vec![
+                        "Visible label".into(),
+                        "Typed answer".into(),
+                    ]]),
+                })
+                .unwrap();
+        }
+        if update.finished {
+            assert_eq!(update.status, "Ready");
+            break;
+        }
+    }
+    worker.join().unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|row| matches!(row.role.as_str(), "user" | "assistant"))
+            .map(|row| (row.role.as_str(), row.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("user", "Original message"),
+            ("user", "Choose\nVisible label\nTyped answer"),
+            ("assistant", "After")
+        ]
+    );
+    assert_eq!(
+        locked(&store)
+            .unwrap()
+            .remote_session(binding.summary.id)
+            .unwrap()
+            .unwrap()
+            .question_answers
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn attachment_upload_is_bounded_journaled_and_retries_the_same_uuid() {
     let dir = Directory::new();
     let store = dir.store();

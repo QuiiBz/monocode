@@ -253,6 +253,17 @@ pub struct Question {
     pub items: Vec<QuestionItem>,
     pub auto_resolve_at: Option<u64>,
 }
+impl Question {
+    pub fn answer_text(&self, answers: &[Vec<String>]) -> String {
+        self.items
+            .iter()
+            .zip(answers)
+            .filter(|(_, values)| !values.is_empty())
+            .map(|(item, values)| format!("{}\n{}", item.prompt, values.join("\n")))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
 pub struct Control {
     pub id: String,
     pub decision: Decision,

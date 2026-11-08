@@ -16,6 +16,8 @@ mod handoff;
 #[cfg(all(test, unix))]
 mod handoff_tests;
 mod persistence;
+#[cfg(all(test, unix))]
+mod question_tests;
 pub(crate) mod remote;
 mod visual_discovery;
 #[cfg(all(test, unix))]
@@ -838,6 +840,25 @@ fn run_turn_using(
                         Event::Question(question) => {
                             status = "Waiting for your answer".into();
                             questions.push(question);
+                            boundary = true;
+                        }
+                        Event::QuestionAnswered(text) => {
+                            let at = transcript.begin("user");
+                            transcript.append(&text);
+                            let turn = transcript.begin("assistant");
+                            start = start.min(at);
+                            pending.changed(at);
+                            if let Some((root_turn, root)) = &turn_receipt {
+                                let answer = monocode_core::agent::TurnInfo {
+                                    joined_turn: Some(*root_turn),
+                                    provider: root.provider.clone(),
+                                    model: root.model.clone(),
+                                    model_id: root.model_id.clone(),
+                                    provider_turn_id: root.provider_turn_id.clone(),
+                                    ..Default::default()
+                                };
+                                persistence::save_turn_receipt(&store, summary.id, turn, answer)?;
+                            }
                             boundary = true;
                         }
                         Event::QuestionResolved(id) => {
