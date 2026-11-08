@@ -11,6 +11,8 @@ use monocode_core::usage::{FetchError, Snapshot};
 use monocode_core::{provider::Kind, usage};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod layout_tests;
 mod resets;
 
 actions!(usage_footer, [DismissUsage, ToggleUsage, RefreshUsage]);
@@ -963,7 +965,21 @@ impl Render for UsageFooter {
                         .on_dismiss(move |window, cx| {
                             let _ = weak.update(cx, |this, cx| this.dismiss(window, cx));
                         })
-                        .child(self.details(cx)),
+                        .child(
+                            div()
+                                .id("usage-details-scroll")
+                                .debug_selector(|| "usage-details-scroll".into())
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .debug_selector(|| "usage-details-body".into())
+                                        .flex_shrink_0()
+                                        .child(self.details(cx)),
+                                ),
+                        ),
                 )
             })
     }
