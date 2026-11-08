@@ -1,5 +1,6 @@
 use super::*;
 use crate::{agent::Settings, store::Store};
+use serde_json::json;
 
 #[test]
 fn account_metadata_selection_and_removal_round_trip_without_credentials() {
@@ -158,9 +159,11 @@ for line in sys.stdin:
     with (home/'trace.jsonl').open('a') as f: f.write(json.dumps(request)+'\n')
     if method == 'initialized': continue
     result = {}
-    if method == 'model/list':
+    if method == 'config/read' and (home/'catalog-config.json').exists():
+        result = {'config':json.loads((home/'catalog-config.json').read_text())}
+    elif method == 'model/list':
         if params.get('cursor') == 'next': result = {'data':[{'model':label+'-page2','displayName':'ZZZ second page'}]}
-        else: result = {'data':[{'model': label+'-'+(home/'model').read_text(), 'displayName':label}], 'nextCursor':'next'}
+        else: result = {'data':[{'model': label+'-'+(home/'model').read_text(), 'displayName':label, 'isDefault':True}], 'nextCursor':'next'}
     elif method == 'account/rateLimits/read': result = {'rateLimits':{'primary':{'usedPercent':11 if label=='one' else 88,'windowDurationMins':300}}}
     elif method == 'account/rateLimitResetCredit/consume':
         assert params['creditId'] == 'fixture-credit' and uuid.UUID(params['idempotencyKey']).version == 4
@@ -238,6 +241,63 @@ for line in sys.stdin:
             provider::run_text(request, Arc::new(AtomicBool::new(false))).unwrap(),
             name
         );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let catalog_id = format!("custom/{name}");
+        let catalog_body = json!({"models":[{"slug":catalog_id,"display_name":"Custom model","supported_reasoning_levels":[{"effort":"high"}],"default_reasoning_level":"high"}]}).to_string();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                request.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            assert!(request.starts_with("GET /codex/v1/models?version=1 HTTP/1.1\r\n"));
+            let headers = request.to_ascii_lowercase();
+            assert!(headers.contains("authorization: bearer fixture-token\r\n"));
+            assert!(headers.contains("x-catalog: fixture\r\n"));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                catalog_body.len(),
+                catalog_body
+            )
+            .unwrap();
+        });
+        std::fs::write(
+            profile.home(Kind::Codex).unwrap().join("catalog-config.json"),
+            json!({"model_provider":"custom","model":catalog_id,"model_providers":{"custom":{"name":"Custom provider","base_url":format!("http://{endpoint}/codex/v1/"),"experimental_bearer_token":"fixture-token","http_headers":{"X-Catalog":"fixture"},"query_params":{"version":"1"}}}}).to_string(),
+        ).unwrap();
+        catalog::invalidate(Kind::Codex, &profile);
+        let custom_models = catalog::models_for(Kind::Codex, &profile).unwrap();
+        server.join().unwrap();
+        assert_eq!(custom_models.len(), 3);
+        assert_eq!(custom_models[0].id, format!("{name}-second"));
+        assert_eq!(custom_models[1].id, format!("{name}-page2"));
+        assert!(custom_models[..2]
+            .iter()
+            .all(|model| model.provider_name.is_none() && !model.default));
+        let custom_model = custom_models
+            .iter()
+            .find(|model| model.id == catalog_id)
+            .unwrap();
+        assert_eq!(custom_model.name, "Custom model");
+        assert_eq!(
+            custom_model.provider_name.as_deref(),
+            Some("Custom provider")
+        );
+        assert!(custom_model.default);
+        assert_eq!(custom_model.efforts, ["high"]);
+        assert_eq!(catalog::models_for(Kind::Codex, &profile).unwrap().len(), 3);
         authenticate(
             Kind::Codex,
             &profile,

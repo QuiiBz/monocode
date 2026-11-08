@@ -282,19 +282,18 @@ impl Conversation {
         }
         self.settings.worktree_cwd.clone()
     }
-    pub(crate) fn settings_models(&self) -> Vec<(String, String)> {
+    pub(crate) fn settings_models(&self) -> Vec<crate::settings::SettingsModel> {
         self.catalog
             .iter()
-            .map(|model| {
-                (
-                    model.id.clone(),
-                    model_display_name(
-                        Kind::from_id(&self.summary.provider),
-                        &model.id,
-                        &model.name,
-                    )
-                    .to_string(),
+            .map(|model| crate::settings::SettingsModel {
+                id: model.id.clone(),
+                name: model_display_name(
+                    Kind::from_id(&self.summary.provider),
+                    &model.id,
+                    &model.name,
                 )
+                .to_string(),
+                provider_name: model.provider_name.clone(),
             })
             .collect()
     }
@@ -4125,6 +4124,7 @@ mod menu_tests {
                 view.settings.effort = Some("xhigh".into());
                 view.catalog = vec![Model {
                     alias_target: None,
+                    provider_name: None,
                     id: "gpt-6.1-sol".into(),
                     name: "GPT-6.1 Sol".into(),
                     efforts: vec!["high".into(), "xhigh".into()],
@@ -4180,6 +4180,7 @@ mod menu_tests {
                 assert_eq!(view.trigger_effort_label().as_deref(), Some("Extra High"));
                 view.catalog.push(Model {
                     alias_target: None,
+                    provider_name: None,
                     id: "gpt-6.1-sol".into(),
                     name: "GPT-6.1 Sol".into(),
                     efforts: vec!["high".into(), "xhigh".into()],
@@ -4270,6 +4271,7 @@ mod menu_tests {
                 });
                 let model = Model {
                     alias_target: None,
+                    provider_name: None,
                     id: "gpt-review".into(),
                     name: "Review model".into(),
                     efforts: vec!["low".into(), "high".into()],

@@ -1789,7 +1789,7 @@ impl Changes {
                     .child(
                         div()
                             .id(("change-counts", ix))
-                            .debug_selector("change-line-counts")
+                            .debug_selector(|| "change-line-counts".into())
                             .role(Role::Label)
                             .aria_label(SharedString::from(format!(
                                 "{} additions, {} deletions",

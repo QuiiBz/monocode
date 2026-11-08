@@ -10,6 +10,22 @@ use gpui::{
     SharedString, Stateful, div, prelude::*, px, relative, rgb,
 };
 
+pub(super) struct SelectOption {
+    pub value: String,
+    pub label: SharedString,
+    pub icon: Option<AnyElement>,
+    pub badge: Option<String>,
+}
+
+impl SelectOption {
+    fn accessible_name(&self) -> SharedString {
+        self.badge.as_ref().map_or_else(
+            || self.label.clone(),
+            |badge| format!("{} · {badge}", self.label).into(),
+        )
+    }
+}
+
 pub(super) const RED: u32 = 0xf87171;
 /// `text-[12px] leading-relaxed` and `text-[13px]` line boxes.
 const RELAXED_12: f32 = 19.5;
@@ -556,6 +572,36 @@ impl SettingsView {
         cx: &mut Context<Self>,
         change: impl Fn(&mut Self, String, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement {
+        self.select_options(
+            id,
+            label,
+            value,
+            options
+                .into_iter()
+                .map(|(value, label, icon)| SelectOption {
+                    value,
+                    label,
+                    icon,
+                    badge: None,
+                })
+                .collect(),
+            width,
+            cx,
+            change,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn select_options(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        value: &str,
+        options: Vec<SelectOption>,
+        width: Option<f32>,
+        cx: &mut Context<Self>,
+        change: impl Fn(&mut Self, String, &mut Context<Self>) + Clone + 'static,
+    ) -> AnyElement {
         let open = self.select_open == Some(id);
         let slot: AnchorSlot = self
             .select_anchors
@@ -563,14 +609,19 @@ impl SettingsView {
             .entry(id)
             .or_default()
             .clone();
-        let selected = options.iter().position(|(v, _, _)| v == value);
+        let selected = options.iter().position(|option| option.value == value);
         let mut options = options;
-        let (trigger_label, trigger_icon) = match selected {
+        let (trigger_label, trigger_icon, trigger_badge, trigger_accessible_name) = match selected {
             Some(ix) => {
-                let (_, text, icon) = &mut options[ix];
-                (text.clone(), icon.take())
+                let option = &mut options[ix];
+                (
+                    option.label.clone(),
+                    option.icon.take(),
+                    option.badge.clone(),
+                    option.accessible_name(),
+                )
             }
-            None => (SharedString::from(value.to_owned()), None),
+            None => (value.to_owned().into(), None, None, value.to_owned().into()),
         };
         // Long lists get a filter field; the list shows only matching rows.
         let searchable = options.len() > SEARCHABLE_SELECT;
@@ -580,9 +631,9 @@ impl SettingsView {
             String::new()
         };
         if !query.is_empty() {
-            options.retain(|(_, text, _)| text.to_lowercase().contains(&query));
+            options.retain(|option| option.accessible_name().to_lowercase().contains(&query));
         }
-        let values: Vec<String> = options.iter().map(|(v, _, _)| v.clone()).collect();
+        let values: Vec<String> = options.iter().map(|option| option.value.clone()).collect();
         let weak = cx.weak_entity();
         div()
             .relative()
@@ -595,7 +646,7 @@ impl SettingsView {
                     .id(SharedString::from(format!("select-{id}")))
                     .debug_selector(move || format!("settings-select-{id}"))
                     .role(Role::ComboBox)
-                    .aria_label(format!("{label}: {trigger_label}"))
+                    .aria_label(format!("{label}: {trigger_accessible_name}"))
                     .aria_expanded(open)
                     .relative()
                     .w_full()
@@ -633,7 +684,13 @@ impl SettingsView {
                                         .child(icon),
                                 )
                             })
-                            .child(div().min_w_0().truncate().child(trigger_label)),
+                            .child(div().min_w_0().truncate().child(trigger_label))
+                            .when_some(trigger_badge, |d, badge| {
+                                d.child(crate::pickers::model_provider_badge(
+                                    badge,
+                                    format!("settings-select-provider-{id}"),
+                                ))
+                            }),
                     )
                     .child(
                         icon("chevron-down-hi", 14.)
@@ -671,7 +728,14 @@ impl SettingsView {
                 let rows = options
                     .into_iter()
                     .enumerate()
-                    .map(|(ix, (option, text, icon_el))| {
+                    .map(|(ix, option)| {
+                        let accessible_name = option.accessible_name();
+                        let SelectOption {
+                            value: option,
+                            label: text,
+                            icon: icon_el,
+                            badge,
+                        } = option;
                         let is_selected = option == value;
                         let highlighted = ix == active;
                         let change = change.clone();
@@ -679,7 +743,7 @@ impl SettingsView {
                             .id(SharedString::from(format!("select-{id}-{ix}")))
                             .debug_selector(move || format!("settings-option-{id}-{ix}"))
                             .role(Role::ListBoxOption)
-                            .aria_label(text.clone())
+                            .aria_label(accessible_name)
                             .aria_selected(is_selected)
                             .w_full()
                             .flex_shrink_0()
@@ -712,6 +776,12 @@ impl SettingsView {
                                 )
                             })
                             .child(div().min_w_0().flex_1().truncate().child(text))
+                            .when_some(badge, |d, badge| {
+                                d.child(crate::pickers::model_provider_badge(
+                                    badge,
+                                    format!("settings-option-provider-{id}-{ix}"),
+                                ))
+                            })
                             .when(is_selected, |d| {
                                 d.child(icon("check-hi", 14.).text_color(content(1.)))
                             })

@@ -94,6 +94,21 @@ fn favorite_label(starred: bool, name: &str) -> String {
         format!("Add {name} to favorites")
     }
 }
+pub(crate) fn model_provider_badge(name: String, selector: String) -> impl IntoElement {
+    div()
+        .debug_selector(move || selector)
+        .flex_shrink_0()
+        .max_w(px(112.))
+        .mx(px(4.))
+        .px(px(5.))
+        .py(px(2.))
+        .rounded(px(4.))
+        .bg(content(0.06))
+        .text_size(px(10.))
+        .text_color(content(0.6))
+        .truncate()
+        .child(name)
+}
 fn contains_account_id(value: &str) -> bool {
     value.match_indices("account-").any(|(offset, _)| {
         let tail = &value[offset + "account-".len()..];
@@ -249,6 +264,7 @@ mod model_label_tests {
                             id: (*id).into(),
                             name: (*id).into(),
                             alias_target: None,
+                            provider_name: None,
                             efforts: Vec::new(),
                             default_effort: None,
                             fast: false,
@@ -425,6 +441,68 @@ mod model_label_tests {
             })
             .unwrap();
     }
+
+    #[gpui::test]
+    fn custom_provider_labels_render_in_models_favorites_and_quick_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        const GATEWAY_MODEL: &str = "openai/gpt-6.1-sol";
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences {
+                favorite_models: vec![crate::settings::ModelChoice {
+                    provider: "codex".into(),
+                    model: Some(GATEWAY_MODEL.into()),
+                }],
+                recent_models: vec![crate::settings::ModelChoice {
+                    provider: "codex".into(),
+                    model: Some(GATEWAY_MODEL.into()),
+                }],
+                ..Default::default()
+            });
+        });
+        let (window, _, _events) =
+            rendered_picker(cx, Kind::Codex, "/work", &[GATEWAY_MODEL, "gpt-6.1-sol"]);
+        window
+            .update(cx, |list, _, cx| {
+                list.catalogs[0].1[0].provider_name = Some("Vercel AI Gateway".into());
+                cx.notify();
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("model-provider-1").is_some());
+        assert!(visual.debug_bounds("model-provider-2").is_none());
+        window
+            .update(visual, |list, _, cx| {
+                list.search
+                    .update(cx, |search, cx| search.set_text("gateway".into(), cx));
+                let entries = list.entries(cx);
+                assert!(
+                    entries
+                        .iter()
+                        .any(|entry| entry.id.as_deref() == Some(GATEWAY_MODEL))
+                );
+                assert!(
+                    !entries
+                        .iter()
+                        .any(|entry| entry.id.as_deref() == Some("gpt-6.1-sol"))
+                );
+                list.tab = ModelTab::Favorites;
+                assert_eq!(list.entries(cx).len(), 1);
+                cx.notify();
+            })
+            .unwrap();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("model-provider-0").is_some());
+        window
+            .update(visual, |list, _, cx| {
+                list.quick = true;
+                cx.notify();
+            })
+            .unwrap();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("quick-model-provider-0").is_some());
+    }
 }
 
 fn search_field<T: 'static>(
@@ -577,6 +655,11 @@ impl ModelList {
             Some(id) => models.iter().find(|m| m.id == id),
             None => models.iter().find(|m| m.default).or(models.first()),
         }
+    }
+    fn model_provider_name(&self, kind: Kind, id: Option<&str>) -> Option<&str> {
+        self.catalog_model(kind, id)
+            .and_then(|model| model.provider_name.as_deref())
+            .filter(|name| !name.trim().is_empty())
     }
     fn favorite(&self, kind: Kind, id: Option<&str>, cx: &gpui::App) -> bool {
         cx.try_global::<crate::settings::Preferences>()
@@ -741,7 +824,14 @@ impl ModelList {
                     }
                     let name = self.saved_model_name(kind, choice.model.as_deref());
                     let name: SharedString = format!("{} · {}", kind.label(), name).into();
-                    if !query.is_empty() && !name.to_lowercase().contains(&query) {
+                    let provider_name = self
+                        .model_provider_name(kind, choice.model.as_deref())
+                        .unwrap_or_default();
+                    if !query.is_empty()
+                        && !format!("{name} {provider_name}")
+                            .to_lowercase()
+                            .contains(&query)
+                    {
                         return None;
                     }
                     Some(ModelEntry {
@@ -823,9 +913,15 @@ impl ModelList {
             .into_iter()
             .filter(|e| {
                 query.is_empty()
-                    || format!("{} {}", e.name, kind.label())
-                        .to_lowercase()
-                        .contains(&query)
+                    || format!(
+                        "{} {} {}",
+                        e.name,
+                        kind.label(),
+                        self.model_provider_name(kind, e.id.as_deref())
+                            .unwrap_or_default()
+                    )
+                    .to_lowercase()
+                    .contains(&query)
             })
             .collect()
     }
@@ -971,6 +1067,11 @@ impl Render for ModelList {
             .enumerate()
             .map(|(ix, entry)| {
                 let highlighted = self.highlighted == ix && entry.enabled;
+                let provider_name = self.model_provider_name(entry.kind, entry.id.as_deref()).map(str::to_owned);
+                let accessible_name: SharedString = provider_name.as_ref().map_or_else(
+                    || entry.name.clone(),
+                    |name| format!("{} · {name}", entry.name).into(),
+                );
                 let current = entry.kind == self.provider && entry.id == self.current;
                 let starred = self.favorite(entry.kind, entry.id.as_deref(), cx);
                 let (star_kind, star_id) = (entry.kind, entry.id.clone());
@@ -999,7 +1100,7 @@ impl Render for ModelList {
                         div()
                             .id(("model-option", ix))
                             .role(Role::ListBoxOption)
-                            .aria_label(entry.name.clone())
+                            .aria_label(accessible_name)
                             .aria_selected(current)
                             .when(!entry.enabled, |d| {
                                 d.aria_description(if self.missing.contains(&entry.kind) {
@@ -1023,6 +1124,9 @@ impl Render for ModelList {
                                     .truncate()
                                     .child(entry.name.clone()),
                             )
+                            .when_some(provider_name, |row, name| {
+                                row.child(model_provider_badge(name, format!("model-provider-{ix}")))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| this.pick(ix, cx))),
                     )
                     .child(
@@ -1226,6 +1330,13 @@ impl ModelList {
             .enumerate()
             .map(|(ix, entry)| {
                 let highlighted = self.highlighted == ix;
+                let provider_name = self
+                    .model_provider_name(entry.kind, entry.id.as_deref())
+                    .map(str::to_owned);
+                let accessible_name: SharedString = provider_name.as_ref().map_or_else(
+                    || entry.name.clone(),
+                    |name| format!("{} · {name}", entry.name).into(),
+                );
                 let current = entry.kind == self.provider && entry.id == self.current;
                 let starred = self.favorite(entry.kind, entry.id.as_deref(), cx);
                 let (star_kind, star_id) = (entry.kind, entry.id.clone());
@@ -1249,7 +1360,7 @@ impl ModelList {
                         div()
                             .id(("quick-model-option", ix))
                             .role(Role::ListBoxOption)
-                            .aria_label(entry.name.clone())
+                            .aria_label(accessible_name)
                             .aria_selected(current)
                             .flex_1()
                             .min_w_0()
@@ -1263,7 +1374,19 @@ impl ModelList {
                             .when(!entry.enabled, |d| d.opacity(0.35))
                             .when(entry.enabled, |d| d.cursor_pointer())
                             .when(favorites, |d| d.child(provider_icon(entry.kind.id(), 14.)))
-                            .child(div().min_w_0().truncate().child(entry.name.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(entry.name.clone()),
+                            )
+                            .when_some(provider_name, |row, name| {
+                                row.child(model_provider_badge(
+                                    name,
+                                    format!("quick-model-provider-{ix}"),
+                                ))
+                            })
                             .when(current, |d| {
                                 d.child(icon("check-2", 14.).ml_auto().text_color(accent_color()))
                             })

@@ -88,6 +88,7 @@ mod tab_motion;
 mod tab_tile;
 mod terminal;
 mod theme;
+mod total_usage;
 #[cfg(target_os = "macos")]
 mod traffic_lights;
 mod transcript;

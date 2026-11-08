@@ -7,6 +7,7 @@ fn model() -> Model {
         id: "test-model".into(),
         name: "Test model".into(),
         alias_target: None,
+        provider_name: None,
         efforts: vec!["low".into(), "high".into()],
         default_effort: Some("low".into()),
         fast: true,

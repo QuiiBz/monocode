@@ -232,6 +232,7 @@ mod tests {
                 model: "Turn Model".into(),
                 model_id: Some("turn-model".into()),
                 provider_turn_id: Some("turn-id".into()),
+                service_tier: Some("fast".into()),
                 started_at: Some(started_at),
                 duration_ms: 9000,
                 duration_known: true,
@@ -249,6 +250,7 @@ mod tests {
         assert_eq!(saved.revision, 42);
         assert_eq!(saved.model.as_deref(), Some("next-turn-model"));
         assert_eq!(saved.turns[&1].model, "Turn Model");
+        assert_eq!(saved.turns[&1].service_tier.as_deref(), Some("fast"));
         assert_eq!(saved.turns[&1].duration_ms, 9000);
         assert_eq!(saved.turns[&1].provider_turn_id.as_deref(), Some("turn-id"));
         assert_eq!(store.load(id).unwrap().rows, transcript.rows);

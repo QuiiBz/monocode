@@ -44,6 +44,7 @@ fn index(kind: Kind) -> usize {
 
 /// Its own cached surface: clock ticks and probe completions don't rebuild chat.
 pub(crate) struct UsageFooter {
+    totals: gpui::Entity<crate::total_usage::TotalUsage>,
     kind: Kind,
     key: Key,
     project: String,
@@ -65,6 +66,10 @@ pub(crate) struct UsageFooter {
     _clock: gpui::Task<()>,
 }
 impl UsageFooter {
+    pub(crate) fn set_database(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.totals
+            .update(cx, |totals, cx| totals.set_database(path, cx));
+    }
     pub(crate) fn context(
         &mut self,
         kind: Kind,
@@ -114,6 +119,7 @@ impl UsageFooter {
             })
         });
         let mut this = Self {
+            totals: cx.new(|_| crate::total_usage::TotalUsage::new()),
             _account_events: crate::accounts::get(cx).map(|center| {
                 cx.subscribe(
                     &center,
@@ -950,6 +956,7 @@ impl Render for UsageFooter {
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(true, cx)))
                     .on_action(cx.listener(|this, _: &RefreshUsage, _, cx| this.refresh(true, cx))),
             )
+            .child(self.totals.clone())
             .when(self.open, |d| {
                 d.child(
                     popover("usage-details", Anchor::Slot(self.anchor.clone()))

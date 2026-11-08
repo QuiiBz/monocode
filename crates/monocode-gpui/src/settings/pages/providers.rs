@@ -1,7 +1,7 @@
 use crate::{
     settings::{
         ModelChoice, SettingsView,
-        widgets::{note, secondary_button},
+        widgets::{SelectOption, note, secondary_button},
     },
     theme::*,
 };
@@ -107,7 +107,7 @@ impl SettingsView {
                 .and_then(|p| p.models.get(kind.id()))
                 .or(p.default_models.get(kind.id()))
                 .cloned()
-                .or_else(|| models.first().map(|m| m.0.clone()));
+                .or_else(|| models.first().map(|model| model.id.clone()));
             let label = div()
                 .flex()
                 .items_center()
@@ -192,13 +192,18 @@ impl SettingsView {
             if let Some(model) = &selected_model {
                 controls.insert(
                     0,
-                    self.select(
+                    self.select_options(
                         kind.id(),
                         kind.label(),
                         model,
                         models
                             .iter()
-                            .map(|(id, name)| (id.clone(), SharedString::from(name.clone()), None))
+                            .map(|model| SelectOption {
+                                value: model.id.clone(),
+                                label: model.name.clone().into(),
+                                icon: None,
+                                badge: model.provider_name.clone(),
+                            })
                             .collect(),
                         None,
                         cx,
@@ -275,29 +280,30 @@ impl SettingsView {
         }
         // Any installed harness that can write one-off text, with the models
         // its sessions have listed; the harness default when none are loaded.
-        let mut background = vec![(
-            "auto".to_owned(),
-            SharedString::from("Automatic"),
-            None::<AnyElement>,
-        )];
+        let mut background = vec![SelectOption {
+            value: "auto".into(),
+            label: "Automatic".into(),
+            icon: None,
+            badge: None,
+        }];
         for kind in Kind::ALL {
             let installed = binaries.iter().any(|(k, p)| *k == kind && p.is_some());
             if !installed || !monocode_core::session_title::supports(kind) {
                 continue;
             }
             match self.ctx.catalogs.get(kind.id()).filter(|m| !m.is_empty()) {
-                Some(models) => background.extend(models.iter().map(|(id, name)| {
-                    (
-                        format!("{}:{id}", kind.id()),
-                        SharedString::from(format!("{} · {name}", kind.label())),
-                        Some(provider_icon(kind.id(), 14.).into_any_element()),
-                    )
+                Some(models) => background.extend(models.iter().map(|model| SelectOption {
+                    value: format!("{}:{}", kind.id(), model.id),
+                    label: format!("{} · {}", kind.label(), model.name).into(),
+                    icon: Some(provider_icon(kind.id(), 14.).into_any_element()),
+                    badge: model.provider_name.clone(),
                 })),
-                None => background.push((
-                    format!("{}:", kind.id()),
-                    SharedString::from(format!("{} · Default model", kind.label())),
-                    Some(provider_icon(kind.id(), 14.).into_any_element()),
-                )),
+                None => background.push(SelectOption {
+                    value: format!("{}:", kind.id()),
+                    label: format!("{} · Default model", kind.label()).into(),
+                    icon: Some(provider_icon(kind.id(), 14.).into_any_element()),
+                    badge: None,
+                }),
             }
         }
         let background_value = p
@@ -305,28 +311,33 @@ impl SettingsView {
             .as_ref()
             .map(|c| format!("{}:{}", c.provider, c.model.as_deref().unwrap_or_default()))
             .unwrap_or_else(|| "auto".into());
-        if !background.iter().any(|(v, _, _)| *v == background_value) {
+        if !background
+            .iter()
+            .any(|option| option.value == background_value)
+        {
             // A saved pick whose catalog is not loaded keeps its own label.
             let choice = p.background_model.clone().unwrap_or(ModelChoice {
                 provider: String::new(),
                 model: None,
             });
-            background.push((
-                background_value.clone(),
-                SharedString::from(format!(
+            background.push(SelectOption {
+                value: background_value.clone(),
+                label: format!(
                     "{} · {}",
                     Kind::from_id(&choice.provider).label(),
                     choice.model.as_deref().unwrap_or("Default model")
-                )),
-                Some(provider_icon(&choice.provider, 14.).into_any_element()),
-            ));
+                )
+                .into(),
+                icon: Some(provider_icon(&choice.provider, 14.).into_any_element()),
+                badge: None,
+            });
         }
         let background = vec![self.row(
             Some("background-model"),
             true,
             "Background model",
             Some("Writes session titles, worktree branch names, commit messages and pull requests. Automatic uses each session's provider and its quick model.".into()),
-            vec![self.select(
+            vec![self.select_options(
                 "background-model",
                 "Background model",
                 &background_value,

@@ -59,12 +59,18 @@ pub(crate) struct SettingsContext {
     pub projects: Vec<(String, String)>,
     pub sessions: Vec<(i64, String, bool)>,
     pub quick_error: Option<String>,
-    pub catalogs: HashMap<String, Vec<(String, String)>>,
+    pub catalogs: HashMap<String, Vec<SettingsModel>>,
     pub inbox_connections: HashMap<String, (bool, String)>,
     /// Mobile access, or `None` when this desktop cannot offer it.
     pub mobile: Option<monocode_core::mobile::Status>,
     /// The pairing code on show.
     pub mobile_invite: Option<monocode_core::mobile::Invite>,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SettingsModel {
+    pub id: String,
+    pub name: String,
+    pub provider_name: Option<String>,
 }
 impl PartialEq for SettingsContext {
     fn eq(&self, other: &Self) -> bool {

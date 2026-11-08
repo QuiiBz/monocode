@@ -36,6 +36,97 @@ fn window(section: Section, cx: &mut TestAppContext) -> WindowHandle<SettingsVie
 }
 
 #[gpui::test]
+fn model_selectors_show_provider_badges_and_search_by_provider(cx: &mut TestAppContext) {
+    const GATEWAY_MODEL: &str = "openai/gpt-6.1-sol";
+    let window = window(Section::Providers, cx);
+    window
+        .update(cx, |view, _, cx| {
+            view.discovery.binaries = vec![(
+                monocode_core::provider::Kind::Codex,
+                Some("/usr/bin/codex".into()),
+            )];
+            let mut models: Vec<_> = (0..9)
+                .map(|index| SettingsModel {
+                    id: format!("builtin-{index}"),
+                    name: format!("Built-in model {index}"),
+                    provider_name: None,
+                })
+                .collect();
+            models.push(SettingsModel {
+                id: GATEWAY_MODEL.into(),
+                name: "GPT-6.1 Sol".into(),
+                provider_name: Some("Vercel AI Gateway".into()),
+            });
+            view.ctx.catalogs.insert("codex".into(), models);
+            view.prefs.background_model = Some(ModelChoice {
+                provider: "codex".into(),
+                model: Some("builtin-0".into()),
+            });
+            cx.notify();
+        })
+        .unwrap();
+    let visual = &mut VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(size(px(1200.), px(2200.)));
+    visual.run_until_parked();
+    for (selector, gateway_index) in [("codex", 9), ("background-model", 10)] {
+        let trigger_badge: &'static str = format!("settings-select-provider-{selector}").leak();
+        assert!(visual.debug_bounds(trigger_badge).is_none());
+        let trigger = visual
+            .debug_bounds(format!("settings-select-{selector}").leak())
+            .unwrap();
+        visual.simulate_click(trigger.center(), Default::default());
+        visual.run_until_parked();
+        assert!(
+            visual
+                .debug_bounds(format!("settings-option-{selector}-0").leak())
+                .is_some()
+        );
+        assert!(
+            visual
+                .debug_bounds(format!("settings-option-provider-{selector}-0").leak())
+                .is_none()
+        );
+        assert!(
+            visual
+                .debug_bounds(format!("settings-option-provider-{selector}-{gateway_index}").leak())
+                .is_some()
+        );
+        window
+            .update(visual, |view, _, cx| {
+                view.select_filter
+                    .update(cx, |input, cx| input.set_text("gateway".into(), cx));
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert!(
+            visual
+                .debug_bounds(format!("settings-option-provider-{selector}-0").leak())
+                .is_some()
+        );
+        assert!(
+            visual
+                .debug_bounds(format!("settings-option-{selector}-1").leak())
+                .is_none()
+        );
+        visual.simulate_keystrokes("enter");
+        visual.run_until_parked();
+        assert!(visual.debug_bounds(trigger_badge).is_some());
+    }
+    window
+        .read_with(visual, |view, _| {
+            assert_eq!(view.prefs.default_models["codex"], GATEWAY_MODEL);
+            assert_eq!(
+                view.prefs.background_model,
+                Some(ModelChoice {
+                    provider: "codex".into(),
+                    model: Some(GATEWAY_MODEL.into()),
+                })
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 fn workspace_style_is_only_offered_under_the_new_layout(cx: &mut TestAppContext) {
     let window = window(Section::Appearance, cx);
     let visual = &mut VisualTestContext::from_window(window.into(), cx);

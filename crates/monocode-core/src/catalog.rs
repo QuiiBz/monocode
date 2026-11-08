@@ -1,5 +1,6 @@
-//! The same live model catalogs the React model picker queries. No inference.
+//! Live model catalogs shared by native model controls.
 mod claude;
+mod codex;
 use crate::{
     process,
     provider::{self, Kind},
@@ -118,6 +119,10 @@ fn remote_catalog_response(value: &Value, providers: Vec<Kind>) -> Result<Remote
                         return None;
                     }
                     let mut model = model(id, row["name"].as_str().unwrap_or(id));
+                    model.provider_name = row["providerName"]
+                        .as_str()
+                        .or_else(|| row["provider_name"].as_str())
+                        .map(str::to_owned);
                     model.default = row["isDefault"] == true || rows.first() == Some(row);
                     for setting in row["settings"].as_array().into_iter().flatten() {
                         let Some(id) = setting["id"].as_str() else {
@@ -177,6 +182,8 @@ fn remote_catalog_response(value: &Value, providers: Vec<Kind>) -> Result<Remote
 pub struct Model {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
     /// Concrete id behind a moving provider alias, retained for comparisons.
     #[serde(default)]
     pub alias_target: Option<String>,
@@ -286,6 +293,11 @@ pub fn models_for(kind: Kind, account: &crate::accounts::Profile) -> Result<Vec<
     } else {
         &value["response"]["response"]["models"]
     };
+    let custom_models = if kind == Kind::Codex {
+        codex::custom_models(&value["config"])?
+    } else {
+        None
+    };
     let mut models: Vec<_> = if kind == Kind::Fx {
         fx_models(&value)
     } else if kind == Kind::Devin {
@@ -349,6 +361,7 @@ pub fn models_for(kind: Kind, account: &crate::accounts::Profile) -> Result<Vec<
                     id: id.into(),
                     name: row["displayName"].as_str().unwrap_or(id).into(),
                     alias_target: None,
+                    provider_name: None,
                     default_effort: row["defaultReasoningEffort"]
                         .as_str()
                         .map(str::to_owned)
@@ -363,6 +376,9 @@ pub fn models_for(kind: Kind, account: &crate::accounts::Profile) -> Result<Vec<
             })
             .collect()
     };
+    if let Some(custom_models) = custom_models {
+        codex::merge_custom_models(&mut models, custom_models);
+    }
     if kind == Kind::Fx {
         if let Ok(status) = cli_json(kind, &["status", "--json"]) {
             if let Some(id) = status["model"].as_str() {
@@ -398,6 +414,7 @@ fn model(id: &str, name: &str) -> Model {
         id: id.into(),
         name: name.into(),
         alias_target: None,
+        provider_name: None,
         efforts: Vec::new(),
         default_effort: None,
         fast: false,
@@ -777,6 +794,7 @@ fn query_provider(
             "usage request"
         };
         let mut catalog_rows = Vec::new();
+        let mut catalog_config: Option<Value> = None;
         let mut cursors = std::collections::HashSet::new();
         let mut claude_asked = false;
         loop {
@@ -814,6 +832,19 @@ fn query_provider(
                             .to_owned());
                     }
                     send(&mut stdin, json!({"method":"initialized"}))?;
+                    if method == "model/list" {
+                        send(
+                            &mut stdin,
+                            json!({"id":3,"method":"config/read","params":{"includeLayers":false}}),
+                        )?;
+                    } else {
+                        send(&mut stdin, json!({"id":2,"method":method,"params":params}))?;
+                    }
+                    request_deadline = Instant::now() + Duration::from_secs(12);
+                }
+                if method == "model/list" && v["id"] == 3 {
+                    let config = v["result"]["config"].clone();
+                    catalog_config = Some(config);
                     send(&mut stdin, json!({"id":2,"method":method,"params":params}))?;
                     request_deadline = Instant::now() + Duration::from_secs(12);
                 }
@@ -842,6 +873,7 @@ fn query_provider(
                             continue;
                         }
                         v["result"]["data"] = catalog_rows.into();
+                        v["config"] = catalog_config.unwrap_or_default();
                     }
                     return Ok(v);
                 }
