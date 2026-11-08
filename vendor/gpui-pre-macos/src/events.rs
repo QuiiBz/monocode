@@ -344,7 +344,10 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
             .to_str()
             .to_string();
         let mut key_char = None;
-        let first_char = characters.chars().next().map(|ch| ch as u16);
+        let first_char = characters
+            .chars()
+            .next()
+            .and_then(|ch| u16::try_from(ch).ok());
         let modifiers = native_event.modifierFlags();
 
         let control = modifiers.contains(NSEventModifierFlags::NSControlKeyMask);
@@ -358,7 +361,7 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
         #[allow(non_upper_case_globals)]
         let key = match first_char {
             Some(SPACE_KEY) => {
-                key_char = Some(" ".to_string());
+                key_char = Some(native_event.characters().to_str().to_string());
                 "space".to_string()
             }
             Some(TAB_KEY) => {
@@ -455,16 +458,11 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
                     chars_ignoring_modifiers = chars_with_cmd;
                 }
 
-                if !control && !command && !function {
-                    let mut mods = NO_MOD;
-                    if shift {
-                        mods |= SHIFT_MOD;
+                if !command && !function {
+                    let text = native_event.characters().to_str().to_string();
+                    if !text.is_empty() && text.chars().all(|character| !character.is_control()) {
+                        key_char = Some(text);
                     }
-                    if alt {
-                        mods |= OPTION_MOD;
-                    }
-
-                    key_char = Some(chars_for_modified_key(native_event.keyCode(), mods));
                 }
 
                 if shift
@@ -507,7 +505,6 @@ fn always_use_command_layout() -> bool {
 const NO_MOD: u32 = 0;
 const CMD_MOD: u32 = 1;
 const SHIFT_MOD: u32 = 2;
-const OPTION_MOD: u32 = 8;
 
 fn chars_for_modified_key(code: CGKeyCode, modifiers: u32) -> String {
     // Values from: https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.6.sdk/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/Headers/Events.h#L126
