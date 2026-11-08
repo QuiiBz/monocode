@@ -2817,3 +2817,115 @@ fn completion_report_flags_a_child_stopped_before_a_restart(cx: &mut TestAppCont
         );
     });
 }
+
+#[gpui::test]
+fn topic_memory_refreshes_from_api_and_saves_without_changing_default(cx: &mut TestAppContext) {
+    let s = setup(cx);
+    let topic = "preferences";
+    let path = "memory/preferences.md";
+    mono::files::save(&s.root, "other-mono", None, path, "Private note", None).unwrap();
+    call(
+        &s,
+        "topic-add",
+        "memory.add",
+        json!({"topic":topic,"fact":"Saved topic fact"}),
+        cx,
+    )
+    .try_recv()
+    .unwrap()
+    .unwrap();
+    s.window
+        .update(cx, |_, window, cx| {
+            s.manager.update(cx, |manager, cx| {
+                manager.settings = Some(SettingsSection::Memory);
+                let mono = manager.current().unwrap().clone();
+                let _ = manager.memory_page(&mono, window, cx);
+                assert_eq!(manager.memory_topics.len(), 1);
+                assert_eq!(manager.memory_topics[0].0, topic);
+                let key = format!("file:{}:{path}", s.id);
+                assert!(
+                    manager.fields[&key]
+                        .read(cx)
+                        .content
+                        .contains("Saved topic fact")
+                );
+            });
+        })
+        .unwrap();
+    call(
+        &s,
+        "topic-replace",
+        "memory.replace",
+        json!({"topic":topic,"find":"Saved topic fact","fact":"Updated topic fact"}),
+        cx,
+    )
+    .try_recv()
+    .unwrap()
+    .unwrap();
+    s.window
+        .update(cx, |_, window, cx| {
+            s.manager.update(cx, |manager, cx| {
+                let mono = manager.current().unwrap().clone();
+                let _ = manager.memory_page(&mono, window, cx);
+                let key = format!("file:{}:{path}", s.id);
+                assert!(
+                    manager.fields[&key]
+                        .read(cx)
+                        .content
+                        .contains("Updated topic fact")
+                );
+                manager.fields[&key].update(cx, |field, cx| field.set_text("User edit".into(), cx));
+                manager.save_open_file(cx);
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        mono::memory::read(&s.root, &s.id, Some(topic))
+            .unwrap()
+            .text
+            .as_deref(),
+        Some("User edit")
+    );
+    assert_eq!(
+        mono::memory::read(&s.root, &s.id, None)
+            .unwrap()
+            .text
+            .as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        mono::memory::read(&s.root, "other-mono", Some(topic))
+            .unwrap()
+            .text
+            .as_deref(),
+        Some("Private note")
+    );
+    s.manager.update(cx, |manager, cx| {
+        let key = format!("file:{}:{path}", s.id);
+        manager.fields[&key].update(cx, |field, cx| field.set_text(String::new(), cx));
+        manager.save_open_file(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        mono::memory::read(&s.root, &s.id, Some(topic))
+            .unwrap()
+            .text
+            .as_deref(),
+        Some("")
+    );
+    s.window
+        .update(cx, |_, window, cx| {
+            s.manager.update(cx, |manager, cx| {
+                manager.create(vec![s.project.clone()], window, cx);
+                assert!(manager.memory_topics.is_empty());
+            });
+        })
+        .unwrap();
+    cx.run_until_parked();
+    s.manager.read_with(cx, |manager, _| {
+        assert_ne!(manager.active.as_deref(), Some(s.id.as_str()));
+        assert!(manager.memory_topics.is_empty());
+        assert!(manager.files.as_ref().unwrap().memory.is_empty());
+    });
+}
