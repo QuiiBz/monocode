@@ -82,6 +82,90 @@ mod tests {
     use super::*;
 
     #[gpui::test]
+    fn terminal_mouse_tracking_routes_buttons_to_program_and_shift_to_local_actions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx.update(|cx| {
+            crate::popover::bind(cx);
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| Terminal::new("/tmp".into(), cx))
+            })
+            .unwrap()
+        });
+        window
+            .update(cx, |terminal, _, _| {
+                write_note(&terminal.term, "\x1b[?1000h\x1b[?1006h")
+            })
+            .unwrap();
+        cx.refresh().unwrap();
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(MouseDownEvent {
+                        position: point(px(20.), px(20.)),
+                        button,
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            window
+                .update(cx, |terminal, _, _| {
+                    assert_eq!(terminal.reported_button, Some(button));
+                    assert!(!terminal.selecting);
+                    assert!(terminal.context_menu.is_none());
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                        position: point(px(20.), px(20.)),
+                        button,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            window
+                .update(cx, |terminal, _, _| {
+                    assert_eq!(terminal.reported_button, None)
+                })
+                .unwrap();
+        }
+        for button in [MouseButton::Left, MouseButton::Right] {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.dispatch_event(
+                    gpui::PlatformInput::MouseDown(MouseDownEvent {
+                        position: point(px(20.), px(20.)),
+                        button,
+                        click_count: 1,
+                        modifiers: gpui::Modifiers {
+                            shift: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            })
+            .unwrap();
+            window
+                .update(cx, |terminal, _, _| {
+                    assert_eq!(terminal.reported_button, None);
+                    assert_eq!(terminal.selecting, button == MouseButton::Left);
+                    assert_eq!(
+                        terminal.context_menu.is_some(),
+                        button == MouseButton::Right
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
     fn terminal_context_menu_copies_selection_and_restores_focus(cx: &mut gpui::TestAppContext) {
         let window = cx.update(|cx| {
             super::super::bind(cx);

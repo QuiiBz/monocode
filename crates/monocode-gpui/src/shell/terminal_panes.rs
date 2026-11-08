@@ -383,6 +383,31 @@ mod tests {
         (visual, project, shell_id)
     }
 
+    #[gpui::test]
+    fn terminal_dock_accepts_mouse_clicks(cx: &mut TestAppContext) {
+        let (window, _, session) = window(cx);
+        let (mut visual, project, _) = dock_with_one_terminal(window, session, cx);
+        let position = visual.debug_bounds("terminal-dock").unwrap().center();
+        window
+            .update(&mut visual, |shell, window, cx| {
+                window.focus(&shell.focus, cx)
+            })
+            .unwrap();
+        visual.simulate_click(position, Modifiers::default());
+        window
+            .update(&mut visual, |shell, window, cx| {
+                assert!(
+                    shell.terminals[&project][0]
+                        .focus_handle(cx)
+                        .is_focused(window)
+                );
+            })
+            .unwrap();
+        visual.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("menu-action-select-all").is_some());
+    }
+
     /// Press a dock tab, pull it off the strip, and release it at `to`.
     fn pull_dock_tab(visual: &mut VisualTestContext, to: Point<Pixels>) {
         let tab = visual.debug_bounds("terminal-tab-0").unwrap().center();

@@ -117,6 +117,7 @@ struct Link {
 
 pub(crate) struct Terminal {
     context_menu: Option<context_menu::EditingMenu>,
+    reported_button: Option<MouseButton>,
     term: Arc<FairMutex<Term<Listener>>>,
     sender: Option<EventLoopSender>,
     focus: FocusHandle,
@@ -317,6 +318,7 @@ impl Terminal {
         });
         Self {
             context_menu: None,
+            reported_button: None,
             term,
             sender,
             focus: cx.focus_handle(),
@@ -550,7 +552,39 @@ impl Terminal {
         );
         link_at(&term, self.url_regex.as_mut()?, at)
     }
+    fn reports_mouse(&self, modifiers: gpui::Modifiers) -> bool {
+        !modifiers.shift && self.term.lock().mode().intersects(TermMode::MOUSE_MODE)
+    }
+    fn report_button(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        self.stop_selection();
+        self.pressed_link = None;
+        self.term.lock().selection = None;
+        self.reported_button = Some(event.button);
+        let (line, column) = self.viewport_cell(event.position);
+        let mode = *self.term.lock().mode();
+        self.write(mouse_report(
+            event.button,
+            false,
+            false,
+            line,
+            column,
+            event.modifiers,
+            mode,
+        ));
+        cx.stop_propagation();
+        cx.notify();
+    }
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.reports_mouse(event.modifiers) {
+            self.report_button(event, window, cx);
+            return;
+        }
         window.focus(&self.focus, cx);
         self.pressed_link = (event.click_count == 1 && !event.modifiers.shift)
             .then(|| self.link_at(event.position))
@@ -598,6 +632,24 @@ impl Terminal {
     /// A click that pressed and released on the same link, without
     /// dragging out a selection, opens it as the web build's xterm does.
     fn mouse_up(&mut self, event: &gpui::MouseUpEvent, cx: &mut Context<Self>) {
+        if self.reported_button == Some(event.button) {
+            self.reported_button = None;
+            let (line, column) = self.viewport_cell(event.position);
+            let mode = *self.term.lock().mode();
+            self.write(mouse_report(
+                event.button,
+                true,
+                false,
+                line,
+                column,
+                event.modifiers,
+                mode,
+            ));
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
         self.stop_selection();
         let Some(link) = self.pressed_link.take() else {
             return;
@@ -660,6 +712,38 @@ impl Terminal {
         true
     }
     fn mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let mode = *self.term.lock().mode();
+        if self.visible
+            && self.context_menu.is_none()
+            && self.reports_mouse(event.modifiers)
+            && !self.selecting
+        {
+            let motion = mode.contains(TermMode::MOUSE_MOTION)
+                || (mode.contains(TermMode::MOUSE_DRAG) && self.reported_button.is_some());
+            if motion
+                && self.geometry.get().is_some_and(|geometry| {
+                    Bounds::new(
+                        geometry.origin,
+                        size(
+                            geometry.cell.width * self.size.columns as f32,
+                            geometry.cell.height * self.size.lines as f32,
+                        ),
+                    )
+                    .contains(&event.position)
+                })
+            {
+                let (line, column) = self.viewport_cell(event.position);
+                self.write(mouse_report(
+                    self.reported_button.unwrap_or(MouseButton::Left),
+                    self.reported_button.is_none(),
+                    true,
+                    line,
+                    column,
+                    event.modifiers,
+                    mode,
+                ));
+            }
+        }
         if !self.selecting {
             return;
         }
@@ -756,14 +840,34 @@ impl Render for Terminal {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    if cfg!(target_os = "macos") && event.modifiers.control {
+                    if cfg!(target_os = "macos")
+                        && event.modifiers.control
+                        && !this.reports_mouse(event.modifiers)
+                    {
                         this.open_context_menu(event, window, cx);
                     } else {
                         this.mouse_down(event, window, cx);
                     }
                 }),
             )
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.reports_mouse(event.modifiers) {
+                        this.report_button(event, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.reports_mouse(event.modifiers) {
+                        this.report_button(event, window, cx);
+                    } else {
+                        this.open_context_menu(event, window, cx);
+                    }
+                }),
+            )
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll(event, cx)))
             .child(Grid {
                 terminal: cx.entity(),
@@ -1157,7 +1261,7 @@ impl Element for Grid {
         });
         let terminal = self.terminal.downgrade();
         window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, _, cx| {
-            if phase == gpui::DispatchPhase::Capture && event.button == MouseButton::Left {
+            if phase == gpui::DispatchPhase::Capture {
                 let _ = terminal.update(cx, |terminal, cx| terminal.mouse_up(event, cx));
             }
         });
@@ -1595,6 +1699,62 @@ fn is_shell_name(name: &str) -> bool {
 
 /// One wheel notch as a mouse report, SGR when asked for, else the legacy
 /// X10 encoding (which cannot address past column or line 223).
+fn mouse_report(
+    button: MouseButton,
+    released: bool,
+    motion: bool,
+    line: usize,
+    column: usize,
+    modifiers: gpui::Modifiers,
+    mode: TermMode,
+) -> Vec<u8> {
+    let button = match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        _ => return Vec::new(),
+    };
+    let mut code = if released && (!mode.contains(TermMode::SGR_MOUSE) || motion) {
+        3
+    } else {
+        button
+    };
+    if motion {
+        code += 32;
+    }
+    if modifiers.shift {
+        code += 4;
+    }
+    if modifiers.alt {
+        code += 8;
+    }
+    if modifiers.control {
+        code += 16;
+    }
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let suffix = if released && !motion { 'm' } else { 'M' };
+        format!("\x1b[<{code};{};{}{suffix}", column + 1, line + 1).into_bytes()
+    } else if mode.contains(TermMode::UTF8_MOUSE) {
+        let coordinate = |value: usize| char::from_u32(value.min(2014) as u32 + 33).unwrap();
+        format!(
+            "\x1b[M{}{}{}",
+            char::from(code + 32),
+            coordinate(column),
+            coordinate(line)
+        )
+        .into_bytes()
+    } else {
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            code + 32,
+            (column.min(222) + 33) as u8,
+            (line.min(222) + 33) as u8,
+        ]
+    }
+}
+
 fn wheel_report(up: bool, line: usize, column: usize, mode: TermMode) -> Vec<u8> {
     let button = if up { 64 } else { 65 };
     if mode.contains(TermMode::SGR_MOUSE) {
@@ -1610,6 +1770,94 @@ mod tests {
     use super::*;
     use alacritty_terminal::index::Line;
     use gpui::{AppContext, Modifiers};
+
+    #[test]
+    fn mouse_buttons_releases_motion_and_modifiers_use_terminal_encodings() {
+        let sgr = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        for (button, code) in [
+            (MouseButton::Left, 0),
+            (MouseButton::Middle, 1),
+            (MouseButton::Right, 2),
+        ] {
+            assert_eq!(
+                mouse_report(button, false, false, 4, 9, Modifiers::default(), sgr),
+                format!("\x1b[<{code};10;5M").as_bytes()
+            );
+            assert_eq!(
+                mouse_report(button, true, false, 4, 9, Modifiers::default(), sgr),
+                format!("\x1b[<{code};10;5m").as_bytes()
+            );
+            assert_eq!(
+                mouse_report(
+                    button,
+                    false,
+                    false,
+                    4,
+                    9,
+                    Modifiers::default(),
+                    TermMode::MOUSE_REPORT_CLICK
+                ),
+                vec![27, b'[', b'M', code + 32, 42, 37]
+            );
+        }
+        assert_eq!(
+            mouse_report(
+                MouseButton::Right,
+                true,
+                false,
+                4,
+                9,
+                Modifiers::default(),
+                TermMode::MOUSE_REPORT_CLICK
+            ),
+            b"\x1b[M#*%"
+        );
+        assert_eq!(
+            mouse_report(
+                MouseButton::Left,
+                false,
+                true,
+                0,
+                0,
+                Modifiers::default(),
+                sgr
+            ),
+            b"\x1b[<32;1;1M"
+        );
+        assert_eq!(
+            mouse_report(
+                MouseButton::Left,
+                true,
+                true,
+                0,
+                0,
+                Modifiers::default(),
+                sgr
+            ),
+            b"\x1b[<35;1;1M"
+        );
+        let modifiers = Modifiers {
+            alt: true,
+            control: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            mouse_report(MouseButton::Right, false, false, 0, 0, modifiers, sgr),
+            b"\x1b[<26;1;1M"
+        );
+        assert_eq!(
+            mouse_report(
+                MouseButton::Left,
+                false,
+                false,
+                0,
+                223,
+                Modifiers::default(),
+                TermMode::UTF8_MOUSE
+            ),
+            "\x1b[M \u{100}!".as_bytes()
+        );
+    }
 
     #[test]
     fn wheel_reports_match_the_requested_encoding() {
