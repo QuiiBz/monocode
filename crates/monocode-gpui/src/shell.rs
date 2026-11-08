@@ -1023,7 +1023,11 @@ impl Shell {
             orchestration_summaries: sidebar_metadata.orchestrations,
             started_by: sidebar_metadata.started_by,
             rails: Default::default(),
-            usage_footer: cx.new(|cx| UsageFooter::new(active_kind, cx)),
+            usage_footer: cx.new(|cx| {
+                let mut footer = UsageFooter::new(active_kind, cx);
+                footer.set_database(store.lock().unwrap().database_path().to_path_buf(), cx);
+                footer
+            }),
             resources,
             sidebar_frame,
             projects_frame,

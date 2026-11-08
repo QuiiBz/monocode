@@ -554,6 +554,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             alias_target: None,
+            provider_name: None,
             efforts: efforts.iter().map(|e| e.to_string()).collect(),
             default_effort: None,
             fast: false,

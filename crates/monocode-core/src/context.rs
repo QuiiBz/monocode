@@ -37,7 +37,9 @@ pub fn claude_used(usage: &Value) -> Option<u64> {
 }
 
 pub fn format_tokens(count: u64) -> String {
-    let (value, suffix) = if count >= 1_000_000 {
+    let (value, suffix) = if count >= 1_000_000_000 {
+        (count as f64 / 1_000_000_000., "B")
+    } else if count >= 1_000_000 {
         (count as f64 / 1_000_000., "M")
     } else if count >= 1000 {
         (count as f64 / 1000., "K")
@@ -53,5 +55,30 @@ pub fn format_tokens(count: u64) -> String {
         )
     } else {
         format!("{value:.0}{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tokens;
+
+    #[test]
+    fn token_units_preserve_precision_at_billions() {
+        for (count, expected) in [
+            (999, "999"),
+            (1_000, "1K"),
+            (1_250_000, "1.2M"),
+            (999_499_999, "999M"),
+            (999_999_999, "1000M"),
+            (1_000_000_000, "1B"),
+            (1_000_000_001, "1B"),
+            (1_250_000_000, "1.2B"),
+            (9_999_999_999, "10B"),
+            (10_000_000_000, "10B"),
+            (80_600_000_000, "81B"),
+            (u64::MAX, "18446744074B"),
+        ] {
+            assert_eq!(format_tokens(count), expected, "{count}");
+        }
     }
 }

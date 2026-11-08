@@ -433,6 +433,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             alias_target: None,
+            provider_name: None,
             efforts: vec!["low".into(), "high".into()],
             default_effort: Some("high".into()),
             fast: false,

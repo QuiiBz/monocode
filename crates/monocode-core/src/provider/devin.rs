@@ -457,6 +457,7 @@ pub(crate) fn catalog_models(raw: &Value) -> Vec<crate::catalog::Model> {
             let fusion = family.variants.len() > 1 && fallback.fusion.is_some();
             let mut model = Model {
                 alias_target: None,
+                provider_name: None,
                 id: if family.variants.len() == 1 {
                     fallback.value.clone()
                 } else {

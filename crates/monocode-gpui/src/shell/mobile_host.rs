@@ -2626,6 +2626,7 @@ mod tests {
     fn model_choices_use_the_same_ids_as_session_cards_and_normalize_back_for_the_cli() {
         let model = monocode_core::catalog::Model {
             alias_target: None,
+            provider_name: None,
             id: "claude-opus-5-5".into(),
             name: "Claude Opus 5.5".into(),
             efforts: vec!["high".into()],

@@ -218,6 +218,14 @@ fn run_turn_using(
                     model_id: settings.model.clone(),
                     ..Default::default()
                 });
+        info.service_tier = Some(if settings.fast {
+            "fast".into()
+        } else {
+            settings
+                .service_tier
+                .clone()
+                .unwrap_or_else(|| "default".into())
+        });
         info.started_at = info.started_at.or(started_at);
         // The receipt's key follows all continuation rows of the prompt.
         let turn = transcript
