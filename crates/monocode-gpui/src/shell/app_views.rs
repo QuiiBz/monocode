@@ -14,6 +14,7 @@ impl Shell {
             AppView::Inbox => "Inbox",
             AppView::Notes => "Notes",
             AppView::Automations => "Automations",
+            AppView::Settings => "Settings",
         })
     }
 
@@ -150,6 +151,12 @@ impl Shell {
     }
 
     pub(super) fn leave_app_views(&mut self, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings.take() {
+            self.saved_settings = Some(settings);
+            if self.mobile.invite.is_some() {
+                self.mobile_cancel_invite(cx);
+            }
+        }
         if self.active_app_view == Some(AppView::Notes)
             && let Some(notes) = &self.notes
         {
@@ -198,12 +205,17 @@ impl Shell {
         self.pending_composer_focus = None;
     }
 
-    fn show_app_view(&mut self, view: AppView, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_app_view(
+        &mut self,
+        view: AppView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.active_app_view != Some(view) {
             self.leave_app_views(cx);
         }
         self.active_app_view = Some(view);
-        if !self.workspace.classic_layout {
+        if !self.workspace.classic_layout || view == AppView::Settings {
             self.remember_title_tab(TitleTab::App(view));
             self.reveal_active_tab(cx);
         }
@@ -220,6 +232,7 @@ impl Shell {
             AppView::Notes => self.notes.clone().map(IntoElement::into_any_element),
             AppView::Inbox => self.inbox.clone().map(IntoElement::into_any_element),
             AppView::Automations => self.automations.clone().map(IntoElement::into_any_element),
+            AppView::Settings => self.settings.clone().map(IntoElement::into_any_element),
         }
     }
 
@@ -230,6 +243,7 @@ impl Shell {
             Some(AppView::Automations) => {
                 self.automations.as_ref().map(|view| view.focus_handle(cx))
             }
+            Some(AppView::Settings) => self.settings.as_ref().map(|view| view.focus_handle(cx)),
             None => return false,
         };
         if let Some(focus) = focus {

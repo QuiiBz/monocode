@@ -374,7 +374,7 @@ impl Shell {
             && self.classic_surface_open(cx);
         let tab_bar = if spans_window || (original && self.search_page()) {
             None
-        } else if original && self.app_view_open() {
+        } else if original && self.app_view_open() && self.settings.is_none() {
             Some(self.titlebar_controls_space(self.classic_app_surface_header(cx), window))
         } else if original && self.mono_active(cx) {
             let bar = self.classic_mono_header(cx);
@@ -727,14 +727,25 @@ impl Shell {
                 .overflow_hidden()
                 .child(search.view.clone());
         }
-        if let Some(settings) = &self.settings {
+        if let Some(settings) = self.settings.clone() {
+            let navigation = self.settings_navigation(cx);
+            let header = settings.update(cx, |view, cx| view.header(false, false, cx));
             return div()
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
                 .flex()
                 .overflow_hidden()
-                .child(settings.clone());
+                .child(div().w(px(220.)).flex_shrink_0().h_full().child(navigation))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().h(px(40.)).flex_shrink_0().child(header))
+                        .child(settings),
+                );
         }
         let panel: Option<Entity<RightPanel>> = self
             .right_panel

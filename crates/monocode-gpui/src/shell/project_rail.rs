@@ -147,7 +147,7 @@ impl Shell {
     pub(super) fn project_rail_drawn_width(&self) -> f32 {
         if !self.workspace.classic_layout {
             0.
-        } else if self.workspace.project_rail_open || self.settings.is_some() {
+        } else if self.workspace.project_rail_open {
             self.workspace.project_rail_width
         } else {
             ICON_RAIL_WIDTH
@@ -162,12 +162,7 @@ impl Shell {
             }
     }
     pub(super) fn toggle_primary_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The classic layout's settings stand in for the project rail and
-        // can't be hidden.
-        if self.settings.is_some() && self.workspace.classic_layout {
-            return;
-        }
-        if self.workspace.classic_layout && self.settings.is_none() {
+        if self.workspace.classic_layout {
             self.workspace.project_rail_open = !self.workspace.project_rail_open;
             self.project_resize = None;
             self.fit_sidebar(cx);
@@ -194,48 +189,44 @@ impl Shell {
                     .clone()
                     .cached(StyleRefinement::default().w(px(width - 1.)).h_full()),
             )
-            .when(
-                self.workspace.project_rail_open && self.settings.is_none(),
-                |d| {
-                    d.child(
-                        div()
-                            .id("project-rail-resize")
-                            .debug_selector(|| "project-rail-resize".into())
-                            .group("resize-handle")
-                            .role(Role::Splitter)
-                            .aria_label("Resize project sidebar")
-                            .absolute()
-                            .right(px(-3.5))
-                            .top_0()
-                            .bottom_0()
-                            .w(px(6.))
-                            .cursor(CursorStyle::ResizeLeftRight)
-                            .child(resize_border(true, self.project_resize.is_some()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                                    this.project_resize =
-                                        Some((e.position.x, this.workspace.project_rail_width));
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }),
-                            )
-                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
-                                if event.click_count() == 2 {
-                                    this.workspace.project_rail_width = 220.;
-                                    this.fit_sidebar(cx);
-                                    this.persist(cx);
-                                    this.invalidate_chrome(cx);
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                },
-            )
+            .when(self.workspace.project_rail_open, |d| {
+                d.child(
+                    div()
+                        .id("project-rail-resize")
+                        .debug_selector(|| "project-rail-resize".into())
+                        .group("resize-handle")
+                        .role(Role::Splitter)
+                        .aria_label("Resize project sidebar")
+                        .absolute()
+                        .right(px(-3.5))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(6.))
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .child(resize_border(true, self.project_resize.is_some()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                this.project_resize =
+                                    Some((e.position.x, this.workspace.project_rail_width));
+                                cx.stop_propagation();
+                                cx.notify();
+                            }),
+                        )
+                        .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                            if event.click_count() == 2 {
+                                this.workspace.project_rail_width = 220.;
+                                this.fit_sidebar(cx);
+                                this.persist(cx);
+                                this.invalidate_chrome(cx);
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
             .into_any_element();
         if cfg!(target_os = "macos")
             && !self.workspace.project_rail_open
-            && self.settings.is_none()
             && self.classic_surface_open(cx)
         {
             // Destination headers live beside the rail. Keep its divider below
@@ -261,18 +252,8 @@ impl Shell {
         }
     }
     pub(super) fn project_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let compact = !self.workspace.project_rail_open && self.settings.is_none();
+        let compact = !self.workspace.project_rail_open;
         let header = titlebar_drag_area().h(px(TITLE_BAR_HEIGHT)).flex_shrink_0();
-        if self.settings.is_some() {
-            let nav = self.sidebar(cx);
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(header)
-                .child(nav)
-                .into_any();
-        }
         if compact {
             return div()
                 .id("project-rail")
@@ -861,6 +842,7 @@ impl Shell {
                             workspace::AppView::Inbox => "rail-inbox",
                             workspace::AppView::Notes => "rail-notes",
                             workspace::AppView::Automations => "rail-automations",
+                            workspace::AppView::Settings => "rail-settings",
                         },
                         view.label(),
                         glyph,
@@ -887,6 +869,9 @@ impl Shell {
                                 workspace::AppView::Inbox => this.open_inbox(w, cx),
                                 workspace::AppView::Notes => this.open_notes(w, cx),
                                 workspace::AppView::Automations => this.open_automations(w, cx),
+                                workspace::AppView::Settings => {
+                                    this.open_settings(crate::settings::Section::General, w, cx)
+                                }
                             }
                         }
                     }))

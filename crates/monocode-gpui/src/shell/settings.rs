@@ -1,9 +1,20 @@
-//! The settings surface replaces the rail body and the workspace, preserving
-//! open conversations. Its breadcrumb/actions occupy the inset title bar.
+//! Settings uses an application tab with its own navigation and page header.
 use super::*;
 use crate::settings::{ArchivedSession, Section, SettingsContext, SettingsEvent, SettingsView};
 use std::path::Path;
 impl Shell {
+    pub(super) fn settings_navigation(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(settings) = self.settings.clone() {
+            let section = settings.read(cx).section;
+            let search = settings.update(cx, |v, cx| v.search_field(true, cx));
+            let select = cx.weak_entity();
+            crate::settings::nav(section, search, move |section, _, cx| {
+                let _ = select.update(cx, |this, cx| this.select_settings(section, cx));
+            })
+        } else {
+            div().into_any_element()
+        }
+    }
     fn settings_context(&self, cx: &App) -> SettingsContext {
         let mut archived: Vec<_> = self
             .order
@@ -136,9 +147,22 @@ impl Shell {
         self.menu = None;
         if self.settings.is_some() {
             self.select_settings(section, cx);
+            self.focus_app_view(window, cx);
             return;
         }
         self.navigation_revision += 1;
+        self.leave_app_views(cx);
+        if let Some(monos) = self.monos.clone() {
+            monos.update(cx, |monos, cx| monos.close(cx));
+        }
+        if let Some(view) = self.saved_settings.take() {
+            self.active_app_view = Some(app_views::AppView::Settings);
+            self.settings = Some(view);
+            self.sync_settings(cx);
+            self.select_settings(section, cx);
+            self.show_app_view(app_views::AppView::Settings, window, cx);
+            return;
+        }
         let context = self.settings_context(cx);
         let prefs = self.workspace.preferences.clone();
         let view = cx.new(|cx| SettingsView::new(section, prefs, context, cx));
@@ -226,7 +250,9 @@ impl Shell {
                         cx.spawn(async move |this, cx| {
                             let result = reset.await;
                             let _ = this.update(cx, |this, cx| {
-                                if let Some(settings) = &this.settings {
+                                if let Some(settings) =
+                                    this.settings.as_ref().or(this.saved_settings.as_ref())
+                                {
                                     settings.update(cx, |s, cx| s.management_finished(result, cx));
                                 }
                                 this.sync_settings(cx);
@@ -252,12 +278,9 @@ impl Shell {
                 SettingsEvent::MobileRevoke(id) => this.mobile_revoke(id, cx),
             },
         ));
-        // This dialog is painted at the window root, like React's portal.
-        // Redraw it for countdown/copy/close changes even when only the
-        // Settings entity was notified, without rebuilding the shell for
-        // ordinary settings edits.
+        // The pairing dialog is at the window root and observes Settings changes.
         let mut overlay_was_open = false;
-        // The search lives in the cached rail, so redraw it as the query moves.
+        // Update the tab navigation when the search query changes.
         let mut search_was = view.read(cx).search_state();
         self.settings_overlay_watch = Some(cx.observe(&view, move |this, view, cx| {
             let open = view.read(cx).mobile_overlay_open();
@@ -272,13 +295,11 @@ impl Shell {
                 cx.notify();
             }
         }));
-        self.settings = Some(view.clone());
-        // Settings has its own complete rail, even when the project rail was hidden.
-        self.settings_nav_visible = true;
-        self.sidebar_slide = None;
-        self.sidebar_fraction = 1.;
-        window.focus(&view.focus_handle(cx), cx);
-        this_update(self, cx);
+        self.active_app_view = Some(app_views::AppView::Settings);
+        let search_focus = view.read(cx).search_focus_handle(cx);
+        self.settings = Some(view);
+        self.show_app_view(app_views::AppView::Settings, window, cx);
+        window.focus(&search_focus, cx);
     }
     pub(super) fn select_settings(&mut self, section: Section, cx: &mut Context<Self>) {
         if let Some(view) = &self.settings {
@@ -297,21 +318,18 @@ impl Shell {
         }
     }
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            self.close_app_view(window, cx);
+        }
+    }
+    pub(super) fn release_settings(&mut self, cx: &mut Context<Self>) {
         self.settings = None;
+        self.saved_settings = None;
         self.settings_events = None;
         self.settings_overlay_watch = None;
-        // A code nobody can see should not stay usable.
         if self.mobile.invite.is_some() {
             self.mobile_cancel_invite(cx);
         }
-        self.sidebar_slide = None;
-        self.sidebar_fraction = if self.workspace.sidebar_visible {
-            1.
-        } else {
-            0.
-        };
-        self.focus_active(window, cx);
-        this_update(self, cx);
     }
     /// MobileSettings.tsx's pair: the desktop listens only while a phone is
     /// paired or being paired, so start listening before making the code.
@@ -439,7 +457,7 @@ impl Shell {
         .detach();
     }
     fn finish_worktree_action(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
-        if let Some(view) = &self.settings {
+        if let Some(view) = self.settings.as_ref().or(self.saved_settings.as_ref()) {
             view.update(cx, |v, cx| v.management_finished(result, cx));
         }
         self.sync_git(cx);
@@ -541,6 +559,270 @@ mod tests {
     use super::*;
     use crate::shell::tests::window;
     use gpui::TestAppContext;
+
+    fn assert_settings_search_focus_on_fresh_open(keyboard: bool, cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            super::super::bind_keys(cx);
+            crate::input::bind(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (window, _, session) = window(cx);
+        window
+            .update(cx, |shell, window, cx| shell.focus_active(window, cx))
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        if keyboard {
+            visual.simulate_keystrokes("cmd-,");
+        } else {
+            visual.dispatch_action(OpenSettings);
+        }
+        visual.run_until_parked();
+        let settings = window
+            .read_with(visual, |shell, _| shell.settings.clone().unwrap())
+            .unwrap();
+        window
+            .update(visual, |_, window, cx| {
+                assert!(settings.read(cx).search_focus_handle(cx).is_focused(window));
+            })
+            .unwrap();
+        visual.simulate_input("theme");
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                shell.select_settings(Section::Appearance, cx);
+                window.focus(&settings.focus_handle(cx), cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert!(!settings.read(cx).search_focus_handle(cx).is_focused(window));
+                shell.open(session, window, cx);
+                assert_eq!(shell.saved_settings.as_ref(), Some(&settings));
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                shell.open_title_tab(&TitleTab::App(app_views::AppView::Settings), window, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert_eq!(shell.settings.as_ref(), Some(&settings));
+                assert_eq!(settings.read(cx).section, Section::Appearance);
+                assert_eq!(settings.read(cx).search_state().0, "theme");
+                assert!(settings.focus_handle(cx).is_focused(window));
+                assert!(!settings.read(cx).search_focus_handle(cx).is_focused(window));
+            })
+            .unwrap();
+        visual.dispatch_action(OpenSettings);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert_eq!(shell.settings.as_ref(), Some(&settings));
+                assert_eq!(settings.read(cx).search_state().0, "theme");
+                assert!(settings.focus_handle(cx).is_focused(window));
+                assert!(!settings.read(cx).search_focus_handle(cx).is_focused(window));
+                shell.open(session, window, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.dispatch_action(OpenSettings);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert_eq!(shell.settings.as_ref(), Some(&settings));
+                assert_eq!(settings.read(cx).search_state().0, "theme");
+                assert!(!settings.read(cx).search_focus_handle(cx).is_focused(window));
+            })
+            .unwrap();
+        visual.dispatch_action(CloseTab);
+        visual.run_until_parked();
+        window
+            .read_with(visual, |shell, _| {
+                assert!(shell.settings.is_none());
+                assert!(shell.saved_settings.is_none());
+            })
+            .unwrap();
+        visual.dispatch_action(OpenSettings);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                let reopened = shell.settings.as_ref().unwrap();
+                assert_ne!(reopened, &settings);
+                assert!(reopened.read(cx).search_state().0.is_empty());
+                assert!(reopened.read(cx).search_focus_handle(cx).is_focused(window));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn settings_search_focus_from_menu_action(cx: &mut TestAppContext) {
+        assert_settings_search_focus_on_fresh_open(false, cx);
+    }
+
+    #[gpui::test]
+    fn settings_search_focus_from_keyboard(cx: &mut TestAppContext) {
+        assert_settings_search_focus_on_fresh_open(true, cx);
+    }
+
+    fn assert_settings_tab_lifecycle(classic: bool, boxy: bool, cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            super::super::bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        let (window, other_project, session) = window(cx);
+        cx.simulate_window_resize(window.into(), gpui::size(px(1500.), px(900.)));
+        window
+            .update(cx, |shell, window, cx| {
+                shell.workspace.classic_layout = classic;
+                shell.workspace.new_layout_boxy = boxy;
+                shell.workspace.sidebar_visible = true;
+                shell.workspace.project_rail_open = true;
+                shell.workspace.right_panel_open = false;
+                shell.layout_changed(cx);
+                shell.focus_active(window, cx);
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.dispatch_action(OpenSettings);
+        visual.run_until_parked();
+        let settings = window
+            .update(visual, |shell, window, cx| {
+                assert_eq!(cx.windows().len(), 1);
+                assert!(shell.session_sidebar_available(cx));
+                assert!(shell.workspace.sidebar_visible);
+                assert!(shell.workspace.project_rail_open);
+                assert_eq!(
+                    shell.active_title_tab(cx),
+                    Some(TitleTab::App(app_views::AppView::Settings))
+                );
+                let settings = shell.settings.clone().unwrap();
+                window.focus(&shell.sidebar_focus, cx);
+                settings
+            })
+            .unwrap();
+        assert!(visual.debug_bounds("app-title-tab-Settings").is_some());
+        assert!(visual.debug_bounds("title-tab-strip").is_some());
+        if classic {
+            assert!(visual.debug_bounds("project-rail").is_some());
+        } else {
+            assert!(visual.debug_bounds("sidebar-content").is_some());
+        }
+        visual.dispatch_action(OpenSettings);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert_eq!(shell.settings.as_ref(), Some(&settings));
+                assert!(settings.focus_handle(cx).contains_focused(window, cx));
+                assert_eq!(
+                    shell
+                        .workspace
+                        .title_order
+                        .iter()
+                        .filter(|tab| **tab == TitleTab::App(app_views::AppView::Settings))
+                        .count(),
+                    1
+                );
+                shell.select_settings(Section::Appearance, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("settings-header").is_some());
+        visual.dispatch_action(NextTab);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert!(shell.settings.is_none());
+                assert_eq!(shell.saved_settings.as_ref(), Some(&settings));
+                assert_eq!(shell.active_title_tab(cx), Some(TitleTab::Session(session)));
+                assert!(
+                    shell.sessions[&session]
+                        .read(cx)
+                        .input
+                        .focus_handle(cx)
+                        .is_focused(window)
+                );
+            })
+            .unwrap();
+        visual.dispatch_action(PreviousTab);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert_eq!(shell.settings.as_ref(), Some(&settings));
+                assert_eq!(settings.read(cx).section, Section::Appearance);
+                assert!(settings.focus_handle(cx).contains_focused(window, cx));
+            })
+            .unwrap();
+        let session_tab = visual
+            .debug_bounds(Box::leak(format!("title-tab-{session}").into_boxed_str()))
+            .unwrap();
+        visual.simulate_click(session_tab.center(), Default::default());
+        visual.run_until_parked();
+        visual.dispatch_action(OpenSettings);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, _, _| {
+                assert_eq!(shell.settings.as_ref(), Some(&settings));
+            })
+            .unwrap();
+        visual.dispatch_action(CloseTab);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, _, cx| {
+                assert!(shell.settings.is_none());
+                assert!(shell.saved_settings.is_none());
+                assert!(
+                    !shell
+                        .visible_tabs(cx)
+                        .contains(&TitleTab::App(app_views::AppView::Settings))
+                );
+                assert_eq!(shell.workspace.active, Some(session));
+                assert!(shell.workspace.tabs.contains(&other_project));
+            })
+            .unwrap();
+        visual.dispatch_action(OpenSettings);
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| shell.open(session, window, cx))
+            .unwrap();
+        visual.run_until_parked();
+        let close = visual.debug_bounds("close-app-tab-Settings").unwrap();
+        visual.simulate_click(close.center(), Default::default());
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert!(shell.saved_settings.is_none());
+                assert!(shell.settings_events.is_none());
+                assert!(shell.settings_overlay_watch.is_none());
+                assert_eq!(shell.workspace.active, Some(session));
+                assert!(
+                    shell.sessions[&session]
+                        .read(cx)
+                        .input
+                        .focus_handle(cx)
+                        .is_focused(window)
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn settings_tab_lifecycle_in_classic_layout(cx: &mut TestAppContext) {
+        assert_settings_tab_lifecycle(true, false, cx);
+    }
+
+    #[gpui::test]
+    fn settings_tab_lifecycle_in_rounded_layout(cx: &mut TestAppContext) {
+        assert_settings_tab_lifecycle(false, false, cx);
+    }
+
+    #[gpui::test]
+    fn settings_tab_lifecycle_in_boxy_layout(cx: &mut TestAppContext) {
+        assert_settings_tab_lifecycle(false, true, cx);
+    }
 
     #[gpui::test]
     fn pairing_dialog_is_a_window_overlay_and_updates_from_settings_notifications(
@@ -663,10 +945,10 @@ mod tests {
             .unwrap();
         let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         visual.run_until_parked();
-        let back = visual.debug_bounds("settings-nav-back").unwrap();
+        assert!(visual.debug_bounds("settings-nav-back").is_none());
         let search = visual.debug_bounds("settings-search").unwrap();
         let first = visual.debug_bounds("settings-nav-general").unwrap();
-        assert!(search.bottom() < first.top() && first.bottom() < back.top());
+        assert!(search.bottom() < first.top());
         visual.simulate_click(search.center(), Default::default());
         visual.simulate_input("theme");
         visual.run_until_parked();
@@ -683,9 +965,7 @@ mod tests {
             .unwrap();
     }
     #[gpui::test]
-    fn settings_replace_native_rail_and_tabs_and_return_to_the_same_session(
-        cx: &mut TestAppContext,
-    ) {
+    fn settings_tab_keeps_navigation_and_returns_to_the_same_session(cx: &mut TestAppContext) {
         cx.update(super::super::bind_keys);
         let (window, _, active) = window(cx);
         window
@@ -694,24 +974,13 @@ mod tests {
         let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         visual.simulate_keystrokes("cmd-,");
         visual.run_until_parked();
-        let card = visual.debug_bounds("main-pane-frame").unwrap();
+        let tab = visual.debug_bounds("app-title-tab-Settings").unwrap();
         let header = visual.debug_bounds("settings-header").unwrap();
-        let page = visual.debug_bounds("settings-page-header").unwrap();
-        assert!(
-            header.bottom() <= px(40.),
-            "breadcrumb and search live in the title bar"
-        );
-        assert!(
-            (page.left()
-                - card.left()
-                - (card.size.width - px(8.) - px(1024.)).max(px(0.)) / 2.
-                - px(33.))
-            .abs()
-                < px(1.),
-            "React's 32px page padding plus the card border: page={page:?}, frame={card:?}"
-        );
+        assert!(header.top() >= tab.bottom());
+        assert!(visual.debug_bounds("settings-page-header").is_some());
         assert!(visual.debug_bounds("settings-toggle-sounds").is_some());
-        assert!(visual.debug_bounds("sidebar-content").is_none());
+        assert!(visual.debug_bounds("sidebar-content").is_some());
+        assert!(visual.debug_bounds("title-tab-strip").is_some());
         for (section, selector) in Section::ALL.into_iter().zip([
             "settings-nav-general",
             "settings-nav-connections",
@@ -740,8 +1009,26 @@ mod tests {
                 section.label()
             );
         }
-        let back = visual.debug_bounds("settings-nav-back").unwrap();
-        visual.simulate_click(back.center(), Default::default());
+        window
+            .update(visual, |shell, window, cx| {
+                shell.open_settings(Section::General, window, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        let previous_sounds = window
+            .read_with(visual, |shell, _| shell.workspace.preferences.sounds)
+            .unwrap();
+        let sounds = visual.debug_bounds("settings-toggle-sounds").unwrap();
+        visual.simulate_click(sounds.center(), Default::default());
+        visual.run_until_parked();
+        window
+            .read_with(visual, |shell, _| {
+                assert_eq!(shell.workspace.preferences.sounds, !previous_sounds);
+            })
+            .unwrap();
+        assert!(visual.debug_bounds("settings-nav-back").is_none());
+        let close = visual.debug_bounds("close-app-tab-Settings").unwrap();
+        visual.simulate_click(close.center(), Default::default());
         visual.run_until_parked();
         window
             .update(visual, |shell, _, _| {
@@ -754,7 +1041,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn settings_nav_collapses_with_search_on_top_and_back_at_the_bottom(cx: &mut TestAppContext) {
+    fn settings_navigation_stays_visible_when_the_app_sidebar_closes(cx: &mut TestAppContext) {
         cx.update(super::super::bind_keys);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (window, _, _) = window(cx);
@@ -764,7 +1051,7 @@ mod tests {
         let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         visual.simulate_keystrokes("cmd-,");
         visual.run_until_parked();
-        let back = visual.debug_bounds("settings-nav-back").unwrap();
+        assert!(visual.debug_bounds("settings-nav-back").is_none());
         let search = visual.debug_bounds("settings-search").unwrap();
         let general = visual.debug_bounds("settings-nav-general").unwrap();
         let header = visual.debug_bounds("settings-header").unwrap();
@@ -772,7 +1059,6 @@ mod tests {
             search.bottom() <= general.top(),
             "search heads the nav, above the pages"
         );
-        assert!(general.bottom() <= back.top(), "Back sits below the pages");
         assert!(search.right() <= header.left(), "search lives in the nav");
 
         let toggle = visual.debug_bounds("toggle-sidebar").unwrap();
@@ -782,17 +1068,14 @@ mod tests {
             .update(visual, |shell, _, _| {
                 assert!(shell.settings.is_some());
                 assert_eq!(shell.sidebar_fraction, 0.);
-                assert!(
-                    shell.workspace.sidebar_visible,
-                    "the project sidebar is untouched"
-                );
+                assert!(!shell.workspace.sidebar_visible);
             })
             .unwrap();
         let search = visual.debug_bounds("settings-search").unwrap();
         let header = visual.debug_bounds("settings-header").unwrap();
         assert!(
-            search.left() >= header.left() && search.bottom() <= header.bottom(),
-            "collapsed, search moves to the title bar"
+            search.right() <= header.left(),
+            "the Settings search stays in the tab navigation"
         );
 
         let toggle = visual.debug_bounds("toggle-sidebar").unwrap();
