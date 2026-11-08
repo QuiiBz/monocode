@@ -54,6 +54,10 @@ pub(crate) struct Preferences {
     pub chat_background_session: u32,
     pub collapsed_project_rail: String,
     pub ui_scale: u32,
+    pub terminal_font_family: String,
+    pub terminal_font_size: f32,
+    pub review_font_family: String,
+    pub review_font_size: f32,
     pub show_excluded_files: bool,
     // Chat
     pub transcript_layout: String,
@@ -149,6 +153,10 @@ impl Default for Preferences {
             chat_background_session: 24,
             collapsed_project_rail: "compact".into(),
             ui_scale: 100,
+            terminal_font_family: String::new(),
+            terminal_font_size: 13.,
+            review_font_family: String::new(),
+            review_font_size: 12.5,
             show_excluded_files: false,
             transcript_layout: "chat".into(),
             anchor_prompts: true,
@@ -254,6 +262,10 @@ impl Preferences {
         self.chat_background_effect = d.chat_background_effect;
         self.chat_background = d.chat_background;
         self.ui_scale = d.ui_scale;
+        self.terminal_font_family = d.terminal_font_family;
+        self.terminal_font_size = d.terminal_font_size;
+        self.review_font_family = d.review_font_family;
+        self.review_font_size = d.review_font_size;
         self.collapsed_project_rail = d.collapsed_project_rail;
     }
 }
@@ -325,5 +337,47 @@ mod decoration_tests {
         assert!(!restored.wayland_window_decorations);
         restored.restore_appearance();
         assert!(restored.wayland_window_decorations);
+    }
+}
+
+pub(crate) fn valid_font_size(size: f32, default: f32) -> f32 {
+    if size.is_finite() && (8.0..=32.0).contains(&size) {
+        size
+    } else {
+        default
+    }
+}
+
+#[cfg(test)]
+mod typography_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_round_trip_and_restore() {
+        let mut preferences: Preferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(preferences.terminal_font_size, 13.);
+        assert_eq!(preferences.review_font_size, 12.5);
+        assert!(preferences.terminal_font_family.is_empty());
+        assert!(preferences.review_font_family.is_empty());
+        preferences.terminal_font_family = "Menlo".into();
+        preferences.terminal_font_size = 18.;
+        preferences.review_font_family = "Courier New".into();
+        preferences.review_font_size = 10.;
+        let saved = serde_json::to_string(&preferences).unwrap();
+        let restored: Preferences = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored, preferences);
+        preferences.restore_appearance();
+        assert_eq!(preferences.terminal_font_size, 13.);
+        assert_eq!(preferences.review_font_size, 12.5);
+    }
+
+    #[test]
+    fn invalid_sizes_use_defaults() {
+        for size in [0., -1., 33., f32::NAN, f32::INFINITY] {
+            assert_eq!(valid_font_size(size, 13.), 13.);
+        }
+        for size in [8., 12.5, 32.] {
+            assert_eq!(valid_font_size(size, 13.), size);
+        }
     }
 }

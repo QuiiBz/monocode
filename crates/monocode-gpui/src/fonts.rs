@@ -1,5 +1,20 @@
 use gpui::{App, Font, FontFallbacks};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+#[derive(Default)]
+struct InstalledFonts(OnceLock<Arc<Vec<String>>>);
+impl gpui::Global for InstalledFonts {}
+
+pub(crate) fn installed(cx: &App) -> Arc<Vec<String>> {
+    let load = || {
+        let mut names = cx.text_system().all_font_names();
+        names.sort();
+        names.dedup();
+        Arc::new(names)
+    };
+    cx.try_global::<InstalledFonts>()
+        .map_or_else(load, |cache| cache.0.get_or_init(load).clone())
+}
 
 /// GPUI resolves this family to the platform system UI font.
 pub(crate) const UI: &str = ".SystemUIFont";
@@ -64,9 +79,18 @@ static TERMINAL: OnceLock<Font> = OnceLock::new();
 /// The terminal's font: a Nerd Font when installed, else the code monospace,
 /// with any installed Nerd Font as the fallback for icon glyphs.
 pub(crate) fn terminal(cx: &App) -> Font {
-    TERMINAL
-        .get_or_init(|| terminal_font(&cx.text_system().all_font_names(), mono()))
-        .clone()
+    let mut font = TERMINAL
+        .get_or_init(|| terminal_font(&installed(cx), mono()))
+        .clone();
+    if let Some(preferences) = cx.try_global::<crate::settings::Preferences>() {
+        font.family = configured_family(
+            &preferences.terminal_font_family,
+            &installed(cx),
+            &font.family,
+        )
+        .into();
+    }
+    font
 }
 
 fn terminal_font(installed: &[String], mono: &str) -> Font {
@@ -86,11 +110,14 @@ fn terminal_font(installed: &[String], mono: &str) -> Font {
     font
 }
 
-pub(crate) fn init(cx: &App) {
+pub(crate) fn init(cx: &mut App) {
+    if cx.try_global::<InstalledFonts>().is_none() {
+        cx.set_global(InstalledFonts::default());
+    }
     if cfg!(target_os = "macos") {
         return;
     }
-    if let Some(family) = pick_mono(&cx.text_system().all_font_names(), system_mono) {
+    if let Some(family) = pick_mono(&installed(cx), system_mono) {
         let _ = MONO.set(family);
     }
 }
@@ -168,5 +195,93 @@ mod tests {
         let font = terminal_font(&names(&["Menlo"]), "Menlo");
         assert_eq!(font.family.as_ref(), "Menlo");
         assert!(font.fallbacks.is_none());
+    }
+}
+
+pub(crate) fn configured_family(requested: &str, installed: &[String], default: &str) -> String {
+    if requested.is_empty() {
+        return default.to_owned();
+    }
+    installed
+        .iter()
+        .find(|family| family.as_str() == requested)
+        .cloned()
+        .unwrap_or_else(|| default.to_owned())
+}
+
+pub(crate) fn review(cx: &App) -> (String, f32) {
+    let preferences = cx.try_global::<crate::settings::Preferences>();
+    let family = preferences.map_or("", |preferences| preferences.review_font_family.as_str());
+    let size = preferences.map_or(12.5, |preferences| preferences.review_font_size);
+    (
+        if family.is_empty() {
+            mono().to_owned()
+        } else {
+            configured_family(family, &installed(cx), mono())
+        },
+        crate::settings::preferences::valid_font_size(size, 12.5),
+    )
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+    #[test]
+    fn unavailable_fonts_use_default() {
+        let installed = vec!["Menlo".to_owned()];
+        assert_eq!(configured_family("Menlo", &installed, "Default"), "Menlo");
+        assert_eq!(
+            configured_family("Missing", &installed, "Default"),
+            "Default"
+        );
+        assert_eq!(configured_family("", &installed, "Default"), "Default");
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use gpui::BorrowAppContext;
+    #[gpui::test]
+    fn cached_font_names_preserve_live_font_selection(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let names =
+                std::sync::Arc::new(vec!["Test Mono A".to_owned(), "Test Mono B".to_owned()]);
+            cx.set_global(super::InstalledFonts(std::sync::OnceLock::from(
+                names.clone(),
+            )));
+            let mut preferences = crate::settings::Preferences::default();
+            preferences.review_font_family = "Test Mono A".into();
+            preferences.terminal_font_family = "Test Mono B".into();
+            cx.set_global(preferences);
+            for _ in 0..100 {
+                assert_eq!(super::review(cx).0, "Test Mono A");
+                assert_eq!(super::terminal(cx).family.as_ref(), "Test Mono B");
+                assert!(std::sync::Arc::ptr_eq(&super::installed(cx), &names));
+            }
+            cx.update_global::<crate::settings::Preferences, _>(|preferences, _| {
+                preferences.review_font_family = "Test Mono B".into();
+                preferences.terminal_font_family = "Test Mono A".into();
+            });
+            assert_eq!(super::review(cx).0, "Test Mono B");
+            assert_eq!(super::terminal(cx).family.as_ref(), "Test Mono A");
+        });
+    }
+    #[gpui::test]
+    fn terminal_and_review_preferences_are_independent(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences::default());
+            let default = super::terminal(cx);
+            cx.update_global::<crate::settings::Preferences, _>(|preferences, _| {
+                preferences.review_font_size = 24.;
+                preferences.terminal_font_family = "Unavailable test font".into();
+            });
+            assert_eq!(super::terminal(cx).family, default.family);
+            assert_eq!(super::review(cx).1, 24.);
+            assert_eq!(
+                cx.global::<crate::settings::Preferences>()
+                    .terminal_font_size,
+                13.
+            );
+        });
     }
 }
