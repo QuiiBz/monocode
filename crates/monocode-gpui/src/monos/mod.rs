@@ -121,6 +121,7 @@ pub(crate) struct Monos {
     saving_files: HashSet<String>,
     file_load_revision: u64,
     files: Option<AgentFiles>,
+    memory_topics: Vec<(String, mono::files::AgentFile)>,
     habits: Vec<Habit>,
     habit_ui: scheduler::HabitUi,
     picker: Option<OpenPicker>,
@@ -357,6 +358,7 @@ impl Monos {
             saving_files: HashSet::new(),
             file_load_revision: 0,
             files: None,
+            memory_topics: Vec::new(),
             habits: Vec::new(),
             habit_ui: scheduler::HabitUi::default(),
             picker: None,
@@ -1105,6 +1107,7 @@ impl Monos {
             self.details.update(cx, |details, cx| details.reset(cx));
             self.fields.retain(|k, _| k.starts_with("file:"));
             self.files = None;
+            self.memory_topics.clear();
             self.habits.clear();
             self.activity_turn = None;
             self.memory_adding = false;
@@ -1182,17 +1185,24 @@ impl Monos {
         let root = self.root.clone();
         let id = id.to_string();
         let work = cx.background_executor().spawn(async move {
-            Ok::<_, String>((
-                mono::load_files(&root, &mono)?,
-                habits::load(&root, &mono.id)?,
-            ))
+            let files = mono::load_files(&root, &mono)?;
+            let topics = files
+                .topics
+                .iter()
+                .map(|topic| {
+                    mono::memory::read(&root, &mono.id, Some(topic))
+                        .map(|file| (topic.clone(), file))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, String>((files, habits::load(&root, &mono.id)?, topics))
         });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, cx| {
                 if this.active.as_deref() == Some(&id) && this.file_load_revision == revision {
                     match result {
-                        Ok((files, habits)) => {
+                        Ok((files, habits, topics)) => {
+                            this.memory_topics = topics;
                             this.files = Some(files);
                             this.habits = habits;
                         }

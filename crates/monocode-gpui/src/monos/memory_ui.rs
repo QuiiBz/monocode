@@ -16,6 +16,25 @@ impl Monos {
         if let Some(files) = &files {
             rows.extend(self.memory_facts(mono, &files.memory, window, cx));
         }
+        for (topic, file) in self.memory_topics.clone() {
+            let path = format!("memory/{topic}.md");
+            let editor = self.file_editor(&path, file.text.unwrap_or_default(), file.hash, cx);
+            rows.push(
+                div()
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_3()
+                    .text_size(px(12.))
+                    .line_height(px(20.))
+                    .text_color(content(0.85))
+                    .child(div().font_weight(gpui::FontWeight::MEDIUM).child(topic))
+                    .child(div().text_color(content(0.45)).child(
+                        "Topic notes · Edit or remove text. Changes save when you leave the editor.",
+                    ))
+                    .child(editor)
+                    .into_any_element(),
+            );
+        }
         let gauge = files.as_ref().map(|files| {
             let loaded = memory::within_budget(&files.memory);
             let lines = loaded.lines().count();
@@ -64,7 +83,7 @@ impl Monos {
                         .child(if dropped > 0 {
                             format!("{dropped} lines not loading")
                         } else {
-                            format!("{lines} / 200 lines")
+                            format!("{lines} / 200 default memory lines")
                         }),
                 )
         });
