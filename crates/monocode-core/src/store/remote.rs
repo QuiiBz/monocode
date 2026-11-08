@@ -1,6 +1,5 @@
-//! Host-owned sessions keep only their desktop identity and command receipts here.
-//! Transcripts remain on the host and use the same lossless block projection as
-//! desktop conversations; no remote row is inserted into the local session table.
+//! Host-owned sessions keep desktop identity, command receipts, and native answers here.
+//! Host blocks and native answers share the desktop transcript projection.
 use super::{shared, Session, Store};
 use crate::{
     agent::{Settings, TurnInfo},
@@ -53,8 +52,32 @@ pub struct RemoteSession {
     pub running: bool,
     #[serde(default)]
     pub needs_input: bool,
+    #[serde(default)]
+    pub question_answers: Vec<Value>,
 }
 impl RemoteSession {
+    pub fn project_history(
+        &self,
+        snapshot: &Value,
+    ) -> Result<(Transcript, HashMap<usize, TurnInfo>), String> {
+        let mut projected = snapshot.clone();
+        let blocks = projected["session"]["blocks"]
+            .as_array_mut()
+            .ok_or("Host transcript is missing")?;
+        for answer in self.question_answers.iter().rev() {
+            let block = &answer["block"];
+            if blocks.iter().any(|existing| existing["id"] == block["id"]) {
+                continue;
+            }
+            let position = blocks
+                .iter()
+                .position(|existing| existing["id"] == answer["after"])
+                .map_or(0, |position| position + 1);
+            blocks.insert(position, block.clone());
+        }
+        Store::project_remote_history(&projected)
+    }
+
     pub fn machine(&self, client: &Connections) -> Result<Machine, String> {
         client
             .list()?
@@ -293,6 +316,7 @@ impl Store {
             configuration: None,
             running: false,
             needs_input: false,
+            question_answers: vec![],
         })?;
         Ok(summary)
     }
@@ -414,6 +438,10 @@ impl Store {
                 .unwrap_or_default(),
             rejected: prior.as_ref().and_then(|remote| remote.rejected.clone()),
             configuration,
+            question_answers: prior
+                .as_ref()
+                .map(|remote| remote.question_answers.clone())
+                .unwrap_or_default(),
             running: value["status"] == "running",
             needs_input: host["needsInput"] == true
                 || host["pendingQuestion"].is_object()

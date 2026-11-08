@@ -168,7 +168,11 @@ fn dispatch_outbox(
         {
             return Err("Remote attachments have not finished uploading".into());
         }
-        let receipt = match client.request(machine, "commands.dispatch", next.clone()) {
+        let mut wire = next.clone();
+        let answer = wire
+            .as_object_mut()
+            .and_then(|command| command.remove("nativeAnswer"));
+        let receipt = match client.request(machine, "commands.dispatch", wire) {
             Ok(receipt) => receipt,
             Err(error) => {
                 if error.starts_with("Host rejected request:") {
@@ -199,6 +203,9 @@ fn dispatch_outbox(
         let mut durable = binding.clone();
         if next["type"] == "create" {
             durable.session_id = Some(id.into());
+        }
+        if let Some(answer) = answer {
+            durable.question_answers.push(answer);
         }
         durable.outbox.remove(0);
         commit(store, binding, durable)?;
@@ -648,6 +655,7 @@ pub(crate) fn run_with_client(
         let mut seen_approvals = HashSet::new();
         let mut seen_questions = HashSet::new();
         let mut last_revision = None;
+        let mut projected_answers = 0;
         let mut control_commands = Vec::<Value>::new();
         let mut stopping_run = None::<String>;
         loop {
@@ -663,14 +671,14 @@ pub(crate) fn run_with_client(
             let current_question = question(&snapshot);
             let mut next = update(if running { "Working…" } else { "Ready" }, !running);
             next.start = latest_rows.len();
-            if revision != last_revision {
+            if revision != last_revision || projected_answers != binding.question_answers.len() {
                 let mut projected = snapshot.clone();
                 monocode_core::remote::attachments::qualify_snapshot(
                     &mut projected,
                     &binding.project.environment_id,
                     &id,
                 );
-                let (history, _) = monocode_core::store::Store::project_remote_history(&projected)?;
+                let (history, _) = binding.project_history(&projected)?;
                 let prefix = latest_rows
                     .iter()
                     .zip(&history.rows)
@@ -679,6 +687,7 @@ pub(crate) fn run_with_client(
                 next.start = prefix;
                 next.rows = history.rows[prefix..].to_vec();
                 latest_rows = history.rows;
+                projected_answers = binding.question_answers.len();
             }
             next.provider_id = snapshot["session"]["providerSessionId"]
                 .as_str()
@@ -759,6 +768,26 @@ pub(crate) fn run_with_client(
                             .filter(|q| q.id == control.id)
                             .ok_or("Host question is no longer pending")?;
                         next["type"] = json!("answer");
+                        let text = question.answer_text(&answers);
+                        if !text.is_empty() {
+                            let after = snapshot["session"]["blocks"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .rev()
+                                .find(|block| block["draft"] != true)
+                                .map(|block| block["id"].clone())
+                                .unwrap_or(Value::Null);
+                            next["nativeAnswer"] = json!({
+                                "after": after,
+                                "block": {
+                                    "id": format!("native-answer-{}", next["commandId"].as_str().unwrap_or_default()),
+                                    "role": "user",
+                                    "text": text,
+                                    "sentAt": monocode_core::time::now_ms(),
+                                },
+                            });
+                        }
                         next["reply"] = reply(question, answers);
                     }
                     Decision::KeepOpen => continue,
