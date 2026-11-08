@@ -10,7 +10,7 @@ mod model;
 mod notification_preferences;
 mod pages;
 mod palettes;
-mod preferences;
+pub(crate) mod preferences;
 mod skill_document;
 pub(crate) use palettes::{PALETTES, palette};
 pub(crate) mod widgets;
