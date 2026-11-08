@@ -477,7 +477,11 @@ impl Popover {
             .overflow_hidden()
             .max_h(px(max_height))
             .when_some(self.options.min_height, |d, h| d.h(px(h.min(max_height))))
-            .when_some(self.options.width, |d, w| d.w(px(w)))
+            .when_some(self.options.width, |d, w| {
+                d.w(px(w.min(
+                    (f32::from(viewport_width) - self.options.padding * 2.).max(0.),
+                )))
+            })
             .when_some(self.fit.0, |d, w| d.min_w(px(w)))
             .when_some(self.fit.1, |d, w| {
                 d.max_w(px(

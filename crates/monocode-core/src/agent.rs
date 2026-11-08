@@ -169,6 +169,7 @@ pub struct TurnInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joined_turn: Option<usize>,
     pub provider_turn_id: Option<String>,
+    pub service_tier: Option<String>,
     pub provider: String,
     pub model: String,
     pub model_id: Option<String>,

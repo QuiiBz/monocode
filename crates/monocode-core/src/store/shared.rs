@@ -190,6 +190,7 @@ pub(super) fn project_turns(
                         provider: model["harness"].as_str().unwrap_or("").into(),
                         model: model["name"].as_str().unwrap_or("").into(),
                         model_id: model["id"].as_str().map(str::to_owned),
+                        service_tier: model["serviceTier"].as_str().map(str::to_owned),
                         duration_ms: duration.unwrap_or(0),
                         duration_known: duration.is_some(),
                         started_at,
@@ -758,6 +759,9 @@ impl Store {
             if source.provider_turn_id.is_some() {
                 info.provider_turn_id = source.provider_turn_id;
             }
+            if source.service_tier.is_some() {
+                info.service_tier = source.service_tier;
+            }
             if source.joined_turn.is_some() {
                 info.joined_turn = source.joined_turn;
             }
@@ -891,6 +895,9 @@ impl Store {
                     } else {
                         format!("{}:{id}", info.provider)
                     });
+                }
+                if let Some(tier) = &info.service_tier {
+                    model["serviceTier"] = json!(tier);
                 }
                 fields.push(("turnModel", model));
             }

@@ -1063,6 +1063,7 @@ fn fresh_native_turn_receipts_persist_source_fields_without_changing_saved_prove
         crate::agent::TurnInfo {
             provider: "codex".into(),
             model: "Chosen Model".into(),
+            service_tier: Some("fast".into()),
             started_at: Some(100),
             ..Default::default()
         },
@@ -1070,6 +1071,13 @@ fn fresh_native_turn_receipts_persist_source_fields_without_changing_saved_prove
     store.save_agent_settings(session.id, &settings).unwrap();
     let initial = store.shared_blocks(session.id).unwrap();
     assert_eq!(initial[0]["startedAt"], 100);
+    assert_eq!(initial[0]["turnModel"]["serviceTier"], "fast");
+    assert_eq!(
+        store.agent_settings(session.id).unwrap().unwrap().turns[&turn]
+            .service_tier
+            .as_deref(),
+        Some("fast")
+    );
     assert!(
         initial[0]["durationMs"].is_null(),
         "a live turn has no invented duration"
@@ -1089,7 +1097,7 @@ fn fresh_native_turn_receipts_persist_source_fields_without_changing_saved_prove
     let source = store.shared_blocks(session.id).unwrap();
     assert_eq!(
         source[0]["turnModel"],
-        json!({"harness":"codex","id":"codex:actual-model","name":"Chosen Model"})
+        json!({"harness":"codex","id":"codex:actual-model","name":"Chosen Model","serviceTier":"fast"})
     );
     assert_eq!(source[0]["providerTurnId"], "provider-turn");
     assert_eq!(source[0]["durationMs"], 5000);
@@ -1099,6 +1107,7 @@ fn fresh_native_turn_receipts_persist_source_fields_without_changing_saved_prove
     assert_eq!(store.load(session.id).unwrap().rows, transcript.rows);
     settings.model = Some("new-picker-value".into());
     settings.turns.get_mut(&turn).unwrap().model = "Wrong later picker".into();
+    settings.turns.get_mut(&turn).unwrap().service_tier = Some("default".into());
     store.save_agent_settings(session.id, &settings).unwrap();
     assert_eq!(
         store.shared_blocks(session.id).unwrap(),
