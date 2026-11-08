@@ -64,7 +64,7 @@ fn relevant(path: &Path) -> bool {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if in_git && IGNORED_GIT_DIRS.contains(&name) {
+        if in_git && (IGNORED_GIT_DIRS.contains(&name) || name.starts_with("fsmonitor--daemon")) {
             return false;
         }
         if IGNORED_DIRS.contains(&name) {
@@ -89,6 +89,12 @@ mod tests {
         assert!(relevant(Path::new("/repo/.git/refs/heads/main")));
         assert!(!relevant(Path::new("/repo/.git/objects/ab/cdef")));
         assert!(!relevant(Path::new("/repo/.git/index.lock")));
+        assert!(!relevant(Path::new("/repo/.git/fsmonitor--daemon.ipc")));
+        assert!(!relevant(Path::new(
+            "/repo/.git/fsmonitor--daemon/cookies/123"
+        )));
+        assert!(!relevant(Path::new("/repo/.git/fsmonitor--daemon.log")));
+        assert!(relevant(Path::new("/repo/src/fsmonitor--daemon.rs")));
         assert!(!relevant(Path::new("/repo/target/debug/app")));
         assert!(!relevant(Path::new("/repo/web/node_modules/x/index.js")));
     }
