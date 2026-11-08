@@ -579,7 +579,15 @@ impl Protocol {
                             )?;
                             return Ok(events);
                         }
-                        let (policy, _, sandbox, reviewer) = self.codex_access();
+                        let (policy, _, mut sandbox, reviewer) = self.codex_access();
+                        let resolved_sandbox = &v["result"]["sandbox"];
+                        if resolved_sandbox["type"] == sandbox["type"] {
+                            let network_required = sandbox["networkAccess"] == true;
+                            sandbox = resolved_sandbox.clone();
+                            if network_required {
+                                sandbox["networkAccess"] = true.into();
+                            }
+                        }
                         let mut params = json!({"threadId":id,"input":self.request.codex_input(),
                             "approvalPolicy":policy,"sandboxPolicy":sandbox,"approvalsReviewer":reviewer});
                         if let Some(effort) = &self.request.settings.effort {
@@ -1926,6 +1934,50 @@ mod tests {
         assert!(instructions.starts_with("You are the coding agent in Monocode."));
         assert!(instructions.contains("## Be quick"));
         assert!(instructions.contains("- /repo"));
+    }
+    #[test]
+    fn codex_turn_retains_resolved_workspace_permissions() {
+        for resumed in [false, true] {
+            for network_access in [false, true] {
+                let mut protocol = protocol(Kind::Codex);
+                protocol.request.settings.access = AccessMode::Auto;
+                protocol.request.provider_id = resumed.then(|| "saved".into());
+                let resolved_sandbox = json!({"type":"workspaceWrite",
+                    "networkAccess":network_access,"writableRoots":["/cache"],
+                    "excludeTmpdirEnvVar":true,"excludeSlashTmp":true});
+                let mut output = Vec::new();
+                protocol
+                    .frame(json!({"id":1,"result":{}}), &mut output)
+                    .unwrap();
+                protocol
+                    .frame(
+                        json!({"id":2,"result":{"thread":{"id":"saved"},
+                    "sandbox":resolved_sandbox}}),
+                        &mut output,
+                    )
+                    .unwrap();
+                let turn = String::from_utf8_lossy(&output)
+                    .lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .find(|message| message["method"] == "turn/start")
+                    .unwrap();
+                assert_eq!(turn["params"]["sandboxPolicy"], resolved_sandbox);
+            }
+        }
+    }
+    #[test]
+    fn codex_turn_rejects_a_resolved_policy_with_different_access() {
+        let mut protocol = protocol(Kind::Codex);
+        let mut output = Vec::new();
+        protocol
+            .frame(
+                json!({"id":2,"result":{"thread":{"id":"saved"},
+            "sandbox":{"type":"dangerFullAccess"}}}),
+                &mut output,
+            )
+            .unwrap();
+        let turn: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "readOnly");
     }
     #[test]
     fn operator_thread_access_keeps_the_codex_app_bridge_reachable_on_later_turns() {
