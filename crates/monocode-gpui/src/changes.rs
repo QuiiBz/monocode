@@ -1788,6 +1788,21 @@ impl Changes {
                     )
                     .child(
                         div()
+                            .id(("change-counts", ix))
+                            .debug_selector("change-line-counts")
+                            .role(Role::Label)
+                            .aria_label(SharedString::from(format!(
+                                "{} additions, {} deletions",
+                                file.additions, file.deletions
+                            )))
+                            .flex_shrink_0()
+                            .child(crate::diff_view::diff_counts(
+                                file.additions as u32,
+                                file.deletions as u32,
+                            )),
+                    )
+                    .child(
+                        div()
                             .w(px(14.))
                             .flex_shrink_0()
                             .flex()
@@ -1994,6 +2009,52 @@ impl Render for Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[gpui::test]
+    fn file_rows_expose_counts_and_refresh_them(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                let git = cx.new(|cx| ProjectGit::new("~".into(), cx));
+                cx.new(|cx| Changes::new(git, window, cx))
+            })
+            .unwrap()
+        });
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        for view in [ChangesView::List, ChangesView::Tree] {
+            for staged in [false, true] {
+                for (additions, deletions) in [(12, 3), (4, 0), (0, 7)] {
+                    window
+                        .update(visual, |changes, _, cx| {
+                            let mut file = f("src/example.rs", "modified");
+                            file.staged = staged;
+                            file.unstaged = !staged;
+                            file.additions = additions;
+                            file.deletions = deletions;
+                            changes.git.update(cx, |git, _| {
+                                git.index = Some(DiffIndex {
+                                    files: vec![file],
+                                    ..Default::default()
+                                });
+                            });
+                            changes.cwd = "/r".into();
+                            changes.set_view(view, cx);
+                        })
+                        .unwrap();
+                    visual.run_until_parked();
+                    let bounds = visual.debug_bounds("change-line-counts").unwrap();
+                    assert!(bounds.size.width > px(0.));
+                    assert!(bounds.size.height > px(0.));
+                    let tree = window
+                        .update(visual, |_, window, _| {
+                            window.debug_a11y_tree_json().unwrap()
+                        })
+                        .unwrap();
+                    assert!(
+                        tree.contains(&format!("{additions} additions, {deletions} deletions"))
+                    );
+                }
+            }
+        }
+    }
     #[gpui::test]
     fn enabling_an_enabled_changes_panel_does_not_reload(cx: &mut gpui::TestAppContext) {
         let window = cx.update(|cx| {
