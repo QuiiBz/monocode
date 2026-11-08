@@ -222,6 +222,36 @@ const PROMPT_DISCLOSURE_MIN: Pixels = px(72.);
 /// `.turn-actions-hover`'s 120ms opacity transition, in seconds.
 const HOVER_FADE: f32 = 0.12;
 
+struct HoverFade {
+    from: f32,
+    to: f32,
+    since: Instant,
+}
+
+impl HoverFade {
+    fn opacity(&self, now: Instant) -> f32 {
+        let progress = (now.duration_since(self.since).as_secs_f32() / HOVER_FADE).min(1.);
+        self.from * (1. - progress) + self.to * progress
+    }
+
+    fn active(&self, now: Instant) -> bool {
+        self.from != self.to && now.duration_since(self.since).as_secs_f32() < HOVER_FADE
+    }
+
+    fn retarget(&mut self, visible: bool, now: Instant, reduce_motion: bool) {
+        let target = if visible { 1. } else { 0. };
+        if self.to != target {
+            self.from = if reduce_motion {
+                target
+            } else {
+                self.opacity(now)
+            };
+            self.to = target;
+            self.since = now;
+        }
+    }
+}
+
 /// useBottomChatMotion's follow: the list keeps its real position at the end
 /// while the painted chat eases into it, so a sent message or a streamed reply
 /// glides up instead of jumping.
@@ -687,8 +717,8 @@ pub(crate) struct TranscriptView {
     mono_groups: std::cell::RefCell<HashMap<usize, usize>>,
     /// The Mono's mascot, colour and name, which sign its turns.
     mono_look: Option<(String, u32, SharedString)>,
-    /// The turn whose actions show, and since when, as `.turn-actions-hover`.
-    hovered_turn: Option<(usize, Instant)>,
+    /// The turn whose actions show, as `.turn-actions-hover`.
+    hovered_turn: Option<usize>,
     /// The prompt message whose copy action shows.
     hovered_prompt: Option<usize>,
     /// The prompt whose action strip the pointer is on. The strip hangs
@@ -697,6 +727,7 @@ pub(crate) struct TranscriptView {
     /// Every hovered row and its turn. Entering the next row can arrive
     /// before leaving the last, so the turn is hovered while any row is.
     hover_rows: HashMap<(usize, usize), usize>,
+    hover_fades: HashMap<(bool, usize), HoverFade>,
     /// Messages entering the chat, by source start, as useBottomChatMotion.
     entrances: HashMap<usize, Instant>,
     /// The emoji a Mono answered a prompt with, by the prompt's start.
@@ -1042,13 +1073,7 @@ impl TranscriptView {
         let copied = self.copied_response.is_some_and(|(id, _)| id == turn);
         let saved = self.note_feedback.get(&turn).is_some_and(|r| r.is_ok());
         let pending = self.note_pending.contains(&turn);
-        let opacity = match self.hovered_turn {
-            Some((hovered, since)) if hovered == turn => {
-                (since.elapsed().as_secs_f32() / HOVER_FADE).min(1.)
-            }
-            _ if copied || pending => 1.,
-            _ => 0.,
-        };
+        let opacity = self.action_opacity(false, turn, copied || pending, cx);
         let completed_at = self
             .turns
             .iter()
@@ -1070,12 +1095,13 @@ impl TranscriptView {
             let quote = output.clone();
             actions = actions
                 .child(
-                    response_actions::button(
+                    self.response_action_button(
                         turn,
+                        "copy",
                         "mono-copy-response",
                         if copied { "Copied" } else { "Copy response" },
                         if copied { "check" } else { "response-copy" },
-                        false,
+                        cx,
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -1097,8 +1123,9 @@ impl TranscriptView {
                     })),
                 )
                 .child(
-                    response_actions::button(
+                    self.response_action_button(
                         turn,
+                        "note",
                         "mono-note-response",
                         if saved {
                             "Saved to Notes"
@@ -1108,7 +1135,7 @@ impl TranscriptView {
                             "Save as note"
                         },
                         if saved { "check" } else { "response-note" },
-                        false,
+                        cx,
                     )
                     .when(pending, |d| d.opacity(0.4))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1124,12 +1151,13 @@ impl TranscriptView {
                     })),
                 )
                 .child(
-                    response_actions::button(
+                    self.response_action_button(
                         turn,
+                        "quote",
                         "mono-quote-response",
                         "Quote response",
                         "comment-add",
-                        false,
+                        cx,
                     )
                     .on_click(cx.listener(move |_, _, window, cx| {
                         cx.emit(MonoResponseAction::Quote {
@@ -1140,17 +1168,19 @@ impl TranscriptView {
                 );
         }
         actions = actions.child(
-            response_actions::button(
+            self.response_action_button(
                 turn,
+                "activity",
                 "mono-response-activity",
                 "Show activity",
                 "list-bullet",
-                false,
+                cx,
             )
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(MonoResponseAction::Activity(turn)))),
         );
         div()
             .id(("mono-turn-actions", turn))
+            .debug_selector(|| "response-actions".into())
             .relative()
             .top(px(-4.))
             .h(px(24.))
@@ -1164,6 +1194,7 @@ impl TranscriptView {
             .text_size(px(14.))
             .text_color(content(0.4))
             .opacity(opacity)
+            .when(opacity == 0., |actions| actions.invisible())
             .child(actions)
             .when_some(completed_at, |d, time| {
                 d.child(dot()).child(
@@ -1173,6 +1204,7 @@ impl TranscriptView {
                         .child(monocode_core::response::local_clock(time)),
                 )
             })
+            .children(self.response_tooltip(turn))
             .into_any_element()
     }
     /// The Mono signs its turn with its mascot and name, beside a live ticker.
@@ -1332,6 +1364,7 @@ impl TranscriptView {
             .collect();
         let copied = self.copied.is_some_and(|id| id == start as u64);
         let sent_at = self.source[start].sent_at;
+        let opacity = self.action_opacity(true, start, false, cx);
         let base = self.base;
         let stamp_anchor = self
             .action_anchors
@@ -1340,6 +1373,9 @@ impl TranscriptView {
             .clone();
         div()
             .id(("prompt-actions", start))
+            .debug_selector(|| "prompt-actions".into())
+            .opacity(opacity)
+            .when(opacity == 0., |actions| actions.invisible())
             .absolute()
             .top_full()
             .right_0()
@@ -1351,6 +1387,7 @@ impl TranscriptView {
                 } else if this.hovered_prompt_actions == Some(start) {
                     this.hovered_prompt_actions = None;
                 }
+                this.update_hover_fades(cx);
                 cx.notify();
             }))
             .flex()
@@ -1431,7 +1468,7 @@ impl TranscriptView {
     }
     /// `.transcript-turn:hover` shows the reply's actions; hovering a prompt
     /// shows only its own.
-    fn mono_hover(
+    fn message_hover(
         &mut self,
         prompt: bool,
         start: usize,
@@ -1455,14 +1492,46 @@ impl TranscriptView {
             Some(turn)
         } else {
             self.hovered_turn
-                .map(|(t, _)| t)
-                .filter(|t| self.hover_rows.values().any(|v| v == t))
+                .filter(|turn| self.hover_rows.values().any(|hovered| hovered == turn))
                 .or_else(|| self.hover_rows.values().next().copied())
         };
-        if current != self.hovered_turn.map(|(t, _)| t) {
-            self.hovered_turn = current.map(|t| (t, Instant::now()));
-        }
+        self.hovered_turn = current;
+        self.update_hover_fades(cx);
         cx.notify();
+    }
+
+    fn update_hover_fades(&mut self, cx: &Context<Self>) {
+        let now = Instant::now();
+        let targets = [
+            self.hovered_turn.map(|turn| (false, turn)),
+            self.hovered_prompt.map(|prompt| (true, prompt)),
+            self.hovered_prompt_actions.map(|prompt| (true, prompt)),
+        ];
+        self.hover_fades
+            .retain(|_, fade| fade.to > 0. || fade.active(now));
+        for key in targets.iter().flatten() {
+            self.hover_fades.entry(*key).or_insert(HoverFade {
+                from: 0.,
+                to: 0.,
+                since: now,
+            });
+        }
+        for (key, fade) in &mut self.hover_fades {
+            fade.retarget(targets.contains(&Some(*key)), now, cx.reduce_motion());
+        }
+    }
+
+    fn action_opacity(&self, prompt: bool, start: usize, pinned: bool, cx: &Context<Self>) -> f32 {
+        if pinned {
+            return 1.;
+        }
+        self.hover_fades.get(&(prompt, start)).map_or(0., |fade| {
+            if cx.reduce_motion() {
+                fade.to
+            } else {
+                fade.opacity(Instant::now())
+            }
+        })
     }
     /// Measures the live turn's tail before the list lays it out, so growth
     /// the list follows is painted as an offset that eases away.
@@ -2139,8 +2208,9 @@ impl TranscriptView {
             || !self.pending_entrances.is_empty()
             || self.reactions.values().any(|(_, born)| born.is_some())
             || self
-                .hovered_turn
-                .is_some_and(|(_, since)| since.elapsed().as_secs_f32() < HOVER_FADE)
+                .hover_fades
+                .values()
+                .any(|fade| fade.active(Instant::now()))
     }
     /// Motion the stream drives: words revealing and fading in and the tail
     /// easing after growth. Only while one is under way, never for as long as
@@ -2162,6 +2232,117 @@ impl TranscriptView {
         }
         cx.notify();
     }
+    fn response_action_button(
+        &mut self,
+        turn: usize,
+        action: &'static str,
+        button_id: &'static str,
+        label: impl Into<SharedString>,
+        glyph: &'static str,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let anchor = self
+            .action_anchors
+            .entry((turn, action))
+            .or_default()
+            .clone();
+        response_actions::button(turn, button_id, label, glyph, false)
+            .child(anchor.probe())
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                this.action_hover(turn, action, *hovered, cx)
+            }))
+    }
+
+    fn response_tooltip(&self, turn: usize) -> Option<gpui::AnyElement> {
+        let (hover_turn, action) = self.hovered_action?;
+        if hover_turn != turn {
+            return None;
+        }
+        let copied = self.copied_response.is_some_and(|(id, _)| id == turn);
+        let saved = self
+            .note_feedback
+            .get(&turn)
+            .is_some_and(|result| result.is_ok());
+        let info = self.turns.get(&turn).cloned().unwrap_or_default();
+        let metrics = info.metrics.filter(|metrics| metrics.reported());
+        let (headline, detail) = match action {
+            "copy" => (if copied { "Copied" } else { "Copy response" }.into(), None),
+            "note" => (
+                if saved {
+                    "Saved to Notes"
+                } else if self.note_pending.contains(&turn) {
+                    "Saving note…"
+                } else {
+                    "Save as note"
+                }
+                .into(),
+                None,
+            ),
+            "quote" => ("Quote response".into(), None),
+            "activity" => ("Show activity".into(), None),
+            "handoff" => ("Handoff".into(), None),
+            "opinion" => ("Second opinion".into(), None),
+            "metrics" => {
+                let metrics = metrics.unwrap_or_default();
+                let mut summary = Vec::new();
+                if let Some(hit) = metrics.cache_hit_percent {
+                    summary.push(format!("Cache hit {hit:.0}%"));
+                }
+                if info.duration_ms > 0 && metrics.output_tokens > 0 {
+                    summary.push(format!(
+                        "Output {:.0} tok/s",
+                        metrics.output_tokens as f64 / (info.duration_ms as f64 / 1000.)
+                    ));
+                }
+                let headline = if summary.is_empty() {
+                    "Turn tokens".into()
+                } else {
+                    summary.join(" · ")
+                };
+                let detail = [
+                    (metrics.input_tokens, "input"),
+                    (metrics.output_tokens, "output"),
+                    (metrics.cache_read_tokens, "cached"),
+                ]
+                .into_iter()
+                .filter(|(n, _)| *n > 0)
+                .map(|(n, label)| format!("{} {label}", monocode_core::context::format_tokens(n)))
+                .collect::<Vec<_>>()
+                .join(" · ");
+                (headline, Some(detail))
+            }
+            _ => return None,
+        };
+        let anchor = self.action_anchors.get(&(turn, action))?;
+        let tooltip_label = headline.clone();
+        Some(
+            popover(("response-tooltip", turn), Anchor::Slot(anchor.clone()))
+                .side(Side::Top)
+                .max_width(if action == "metrics" { 300. } else { 240. })
+                .padding(8.)
+                .child(
+                    div()
+                        .id(("response-tooltip-content", turn))
+                        .debug_selector(move || format!("response-tooltip-{tooltip_label}"))
+                        .flex()
+                        .flex_col()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(content(1.))
+                        .child(headline)
+                        .when_some(detail, |d, detail| {
+                            d.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(content(0.5))
+                                    .child(detail),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn response_actions(
         &mut self,
         turn: usize,
@@ -2187,6 +2368,7 @@ impl TranscriptView {
         let copied = self.copied_response.is_some_and(|(id, _)| id == turn);
         let saved = self.note_feedback.get(&turn).is_some_and(|r| r.is_ok());
         let pending = self.note_pending.contains(&turn);
+        let opacity = self.action_opacity(false, turn, copied || pending, cx);
         let info = self.turns.get(&turn).cloned().unwrap_or_default();
         let metrics = info.metrics.filter(|m| m.reported());
         // Reserve the full icon strip before the sibling clock is laid out.
@@ -2202,25 +2384,17 @@ impl TranscriptView {
             .w(px(strip_width));
         if !output.is_empty() {
             let copy_label = if copied { "Copied" } else { "Copy response" };
-            let anchor = self
-                .action_anchors
-                .entry((turn, "copy"))
-                .or_default()
-                .clone();
             let text = output.clone();
             actions = actions.child(
-                response_actions::button(
+                self.response_action_button(
                     turn,
+                    "copy",
                     "response-copy",
                     copy_label,
                     if copied { "check" } else { "response-copy" },
-                    false,
+                    cx,
                 )
                 .ml(px(-4.))
-                .child(anchor.probe())
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    this.action_hover(turn, "copy", *hovered, cx)
-                }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
                     let born = Instant::now();
@@ -2240,14 +2414,10 @@ impl TranscriptView {
                     .detach();
                 })),
             );
-            let anchor = self
-                .action_anchors
-                .entry((turn, "note"))
-                .or_default()
-                .clone();
             actions = actions.child(
-                response_actions::button(
+                self.response_action_button(
                     turn,
+                    "note",
                     "response-note",
                     if saved {
                         "Saved to Notes"
@@ -2257,13 +2427,9 @@ impl TranscriptView {
                         "Save as note"
                     },
                     if saved { "check" } else { "response-note" },
-                    false,
+                    cx,
                 )
                 .when(pending, |d| d.opacity(0.4))
-                .child(anchor.probe())
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    this.action_hover(turn, "note", *hovered, cx)
-                }))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.note_pending.insert(turn) {
                         this.note_feedback.remove(&turn);
@@ -2349,6 +2515,10 @@ impl TranscriptView {
                 .bg(content(0.25))
         };
         let mut row = div()
+            .id(("turn-actions", turn))
+            .debug_selector(|| "response-actions".into())
+            .opacity(opacity)
+            .when(opacity == 0., |actions| actions.invisible())
             .w_full()
             .min_w_0()
             .flex()
@@ -2377,82 +2547,9 @@ impl TranscriptView {
                     .child(format!("Could not save note. {error}")),
             );
         }
-        if let Some((hover_turn, action)) = self.hovered_action
-            && hover_turn == turn
-        {
-            let (headline, detail) = match action {
-                "copy" => (if copied { "Copied" } else { "Copy response" }.into(), None),
-                "note" => (
-                    if saved {
-                        "Saved to Notes"
-                    } else {
-                        "Save as note"
-                    }
-                    .into(),
-                    None,
-                ),
-                "handoff" => ("Handoff".into(), None),
-                "opinion" => ("Second opinion".into(), None),
-                _ => {
-                    let metrics = metrics.unwrap_or_default();
-                    let mut summary = Vec::new();
-                    if let Some(hit) = metrics.cache_hit_percent {
-                        summary.push(format!("Cache hit {hit:.0}%"));
-                    }
-                    if info.duration_ms > 0 && metrics.output_tokens > 0 {
-                        summary.push(format!(
-                            "Output {:.0} tok/s",
-                            metrics.output_tokens as f64 / (info.duration_ms as f64 / 1000.)
-                        ));
-                    }
-                    let headline = if summary.is_empty() {
-                        "Turn tokens".into()
-                    } else {
-                        summary.join(" · ")
-                    };
-                    let detail = [
-                        (metrics.input_tokens, "input"),
-                        (metrics.output_tokens, "output"),
-                        (metrics.cache_read_tokens, "cached"),
-                    ]
-                    .into_iter()
-                    .filter(|(n, _)| *n > 0)
-                    .map(|(n, label)| {
-                        format!("{} {label}", monocode_core::context::format_tokens(n))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                    (headline, Some(detail))
-                }
-            };
-            if let Some(anchor) = self.action_anchors.get(&(turn, action)) {
-                row = row.child(
-                    popover(("response-tooltip", turn), Anchor::Slot(anchor.clone()))
-                        .side(Side::Top)
-                        .max_width(if action == "metrics" { 300. } else { 240. })
-                        .padding(8.)
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .text_size(px(12.))
-                                .line_height(px(16.))
-                                .text_color(content(1.))
-                                .child(headline)
-                                .when_some(detail, |d, detail| {
-                                    d.child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(content(0.5))
-                                            .child(detail),
-                                    )
-                                }),
-                        ),
-                );
-            }
-        }
-        row.into_any_element()
+        row.children(self.response_tooltip(turn)).into_any_element()
     }
+
     pub(crate) fn new() -> Self {
         Self {
             selection: Default::default(),
@@ -2483,6 +2580,7 @@ impl TranscriptView {
             hovered_prompt: None,
             hovered_prompt_actions: None,
             hover_rows: HashMap::new(),
+            hover_fades: HashMap::new(),
             entrances: HashMap::new(),
             reactions: HashMap::new(),
             follow: Follow::default(),
@@ -5436,13 +5534,9 @@ impl TranscriptView {
                     .when(user && self.mono && first, |d| {
                         d.children(self.reaction_badge(message_start))
                     })
-                    .when(
-                        user && last
-                            && !stacked
-                            && (self.hovered_prompt == Some(message_start)
-                                || self.hovered_prompt_actions == Some(message_start)),
-                        |d| d.child(self.prompt_actions(message_start, cx)),
-                    );
+                    .when(user && last && !stacked, |d| {
+                        d.child(self.prompt_actions(message_start, cx))
+                    });
                 match photo_body {
                     // Photos and their bubble enter as one message.
                     Some(photos) => div()
@@ -5708,9 +5802,9 @@ impl TranscriptView {
         };
         outer
             .when(motion.is_some(), |d| d.overflow_hidden())
-            .when(self.mono || user, |d| {
+            .when(!self.document, |d| {
                 d.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    this.mono_hover(user, message_start, message_turn, key, *hovered, cx)
+                    this.message_hover(user, message_start, message_turn, key, *hovered, cx)
                 }))
             })
             .opacity(opacity)
@@ -6840,29 +6934,286 @@ mod scroll_tests {
         }
     }
 
+    #[test]
+    fn chat_hover_fade_reverses_without_a_jump_and_stops_at_both_ends() {
+        let now = Instant::now();
+        let half_fade = std::time::Duration::from_secs_f32(HOVER_FADE / 2.);
+        let mut fade = HoverFade {
+            from: 0.,
+            to: 0.,
+            since: now,
+        };
+        fade.retarget(true, now, false);
+        assert_eq!(fade.opacity(now), 0.);
+        assert!((fade.opacity(now + half_fade) - 0.5).abs() < 0.001);
+        fade.retarget(false, now + half_fade, false);
+        assert!((fade.opacity(now + half_fade) - 0.5).abs() < 0.001);
+        assert!((fade.opacity(now + half_fade * 2) - 0.25).abs() < 0.001);
+        assert!(fade.active(now + half_fade * 2));
+        assert_eq!(fade.opacity(now + half_fade * 3), 0.);
+        assert!(!fade.active(now + half_fade * 3));
+        fade.retarget(true, now + half_fade * 3, false);
+        assert_eq!(fade.opacity(now + half_fade * 5), 1.);
+        assert!(!fade.active(now + half_fade * 5));
+        fade.retarget(false, now + half_fade * 5, true);
+        assert_eq!(fade.opacity(now + half_fade * 5), 0.);
+        assert!(!fade.active(now + half_fade * 5));
+    }
+
+    fn check_chat_hover_controls(cx: &mut TestAppContext, mono: bool) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(900.), px(600.)),
+                    ))),
+                    ..Default::default()
+                },
+                |_, cx| {
+                    cx.new(|cx| {
+                        let mut view = TranscriptView::new();
+                        if mono {
+                            view.mono_mode("cat", 0xe86b5f, "MonoCat");
+                        }
+                        let mut prompt = row("user", "Question");
+                        prompt.sent_at = Some(1_700_000_000_000);
+                        view.patch(0, vec![prompt, row("assistant", "Answer")], cx);
+                        view.turns.insert(
+                            1,
+                            monocode_core::agent::TurnInfo {
+                                completed_at: Some(1_700_000_001_000),
+                                ..Default::default()
+                            },
+                        );
+                        settle(&mut view, cx);
+                        // Keep every control in view while checking its hitbox and row spacing.
+                        view.list =
+                            ListState::new(view.rows.len() + 1, ListAlignment::Top, px(320.));
+                        view.list.pause_following_tail();
+                        view
+                    })
+                },
+            )
+            .unwrap()
+        });
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        visual.run_until_parked();
+        visual.simulate_mouse_move(point(px(2.), px(2.)), None, Default::default());
+        let (prompt, reply, original_bounds) = window
+            .update(visual, |view, _, cx| {
+                assert_eq!(view.action_opacity(true, 0, false, cx), 0.);
+                assert_eq!(view.action_opacity(false, 1, false, cx), 0.);
+                let bounds: Vec<_> = (0..view.rows.len())
+                    .map(|index| {
+                        view.list.bounds_for_item(index).unwrap_or_else(|| {
+                            panic!("row {index} has no bounds in mono mode {mono}, scroll {:?}, viewport {:?}", view.list.logical_scroll_top(), view.viewport)
+                        })
+                    })
+                    .collect();
+                let prompt = view
+                    .rows
+                    .iter()
+                    .position(|row| matches!(row.body, Body::Plain(_)))
+                    .unwrap();
+                let reply = view
+                    .rows
+                    .iter()
+                    .position(|row| matches!(row.body, Body::Markdown(_)))
+                    .unwrap();
+                (bounds[prompt].center(), bounds[reply].center(), bounds)
+            })
+            .unwrap();
+        visual.simulate_mouse_move(prompt, None, Default::default());
+        window
+            .update(visual, |view, _, cx| {
+                assert_eq!(view.action_opacity(true, 0, false, cx), 1.);
+                assert_eq!(view.action_opacity(false, 1, false, cx), 0.);
+                assert!(!view.chat_animating());
+            })
+            .unwrap();
+        assert!(visual.debug_bounds("message-sent-at").is_some());
+        let prompt_actions = visual.debug_bounds("prompt-actions").unwrap();
+        visual.simulate_mouse_move(prompt_actions.center(), None, Default::default());
+        window
+            .update(visual, |view, _, cx| {
+                assert_eq!(view.action_opacity(true, 0, false, cx), 1.);
+            })
+            .unwrap();
+        visual.simulate_click(
+            point(
+                prompt_actions.left() + px(23.),
+                prompt_actions.top() + px(15.),
+            ),
+            Default::default(),
+        );
+        window
+            .update(visual, |view, _, _| assert_eq!(view.copied, Some(0)))
+            .unwrap();
+        visual.simulate_mouse_move(reply, None, Default::default());
+        window
+            .update(visual, |view, _, cx| {
+                assert_eq!(view.action_opacity(true, 0, false, cx), 0.);
+                assert_eq!(view.action_opacity(false, 1, false, cx), 1.);
+            })
+            .unwrap();
+        visual.simulate_mouse_move(point(px(2.), px(2.)), None, Default::default());
+        window
+            .update(visual, |view, _, cx| {
+                assert_eq!(view.action_opacity(false, 1, false, cx), 0.);
+                for (index, original) in original_bounds.iter().enumerate() {
+                    assert_eq!(view.list.bounds_for_item(index).unwrap(), *original);
+                }
+            })
+            .unwrap();
+        visual.simulate_mouse_move(reply, None, Default::default());
+        let response_actions = visual.debug_bounds("response-actions").unwrap();
+        let extra_controls = if mono {
+            [
+                ("quote", "response-tooltip-Quote response"),
+                ("activity", "response-tooltip-Show activity"),
+            ]
+        } else {
+            [
+                ("handoff", "response-tooltip-Handoff"),
+                ("opinion", "response-tooltip-Second opinion"),
+            ]
+        };
+        for (action, selector) in [
+            ("copy", "response-tooltip-Copy response"),
+            ("note", "response-tooltip-Save as note"),
+        ]
+        .into_iter()
+        .chain(extra_controls)
+        {
+            let anchor = window
+                .update(visual, |view, _, _| {
+                    view.action_anchors[&(1, action)].get().unwrap()
+                })
+                .unwrap();
+            visual.simulate_mouse_move(anchor.center(), None, Default::default());
+            let tooltip = visual
+                .debug_bounds(selector)
+                .expect("hover must show the button's tooltip");
+            assert!(
+                tooltip.bottom() <= anchor.top(),
+                "tooltips must extend above the action row"
+            );
+            window
+                .update(visual, |view, window, _| {
+                    assert_eq!(view.hovered_action, Some((1, action)));
+                    let center = tooltip.center();
+                    let scale = window.scale_factor();
+                    let center = point(
+                        gpui::ScaledPixels(f32::from(center.x) * scale),
+                        gpui::ScaledPixels(f32::from(center.y) * scale),
+                    );
+                    assert!(
+                        window.painted_quads().iter().any(|quad| {
+                            quad.bounds.contains(&center)
+                                && quad.content_mask.bounds.contains(&center)
+                                && quad.background != gpui::transparent_black().into()
+                        }),
+                        "the tooltip must remain visible outside the row's clip"
+                    );
+                    for (index, original) in original_bounds.iter().enumerate() {
+                        assert_eq!(view.list.bounds_for_item(index).unwrap(), *original);
+                    }
+                })
+                .unwrap();
+            visual.simulate_mouse_move(reply, None, Default::default());
+            assert!(visual.debug_bounds(selector).is_none());
+        }
+        let copy_position = point(
+            response_actions.left() + px(11.),
+            response_actions.top() + px(if mono { 11. } else { 15. }),
+        );
+        visual.simulate_mouse_move(copy_position, None, Default::default());
+        visual.simulate_click(copy_position, Default::default());
+        window
+            .update(visual, |view, _, _| {
+                assert_eq!(view.copied_response.map(|(turn, _)| turn), Some(1));
+            })
+            .unwrap();
+        assert!(visual.debug_bounds("response-tooltip-Copied").is_some());
+        let note_anchor = window
+            .update(visual, |view, _, _| {
+                view.action_anchors[&(1, "note")].get().unwrap()
+            })
+            .unwrap();
+        visual.simulate_mouse_move(note_anchor.center(), None, Default::default());
+        visual.simulate_click(note_anchor.center(), Default::default());
+        assert!(
+            visual
+                .debug_bounds("response-tooltip-Saving note…")
+                .is_some()
+        );
+        window
+            .update(visual, |view, _, cx| view.note_result(1, Ok(()), cx))
+            .unwrap();
+        visual.run_until_parked();
+        assert!(
+            visual
+                .debug_bounds("response-tooltip-Saved to Notes")
+                .is_some()
+        );
+    }
+
     #[gpui::test]
-    fn mono_turn_actions_stay_while_moving_between_its_rows_in_any_event_order(
+    fn chat_hover_regular_controls_keep_dates_clicks_and_layout(cx: &mut TestAppContext) {
+        check_chat_hover_controls(cx, false);
+    }
+
+    #[gpui::test]
+    fn chat_hover_mono_controls_keep_dates_clicks_and_layout(cx: &mut TestAppContext) {
+        check_chat_hover_controls(cx, true);
+    }
+
+    #[gpui::test]
+    fn chat_hover_actions_stay_while_moving_between_rows_in_either_event_order(
         cx: &mut TestAppContext,
     ) {
-        let view = cx.new(|_| {
-            let mut view = TranscriptView::new();
-            view.mono_mode("cat", 0xe86b5f, "MonoCat");
-            view
-        });
-        view.update(cx, |view, cx| {
-            view.patch(
-                0,
-                vec![row("user", "Hi"), row("assistant", "Hello there")],
-                cx,
-            );
-            // The next row reports its enter before the last one leaves.
-            view.mono_hover(false, 1, 1, (1, 16), true, cx);
-            view.mono_hover(false, 1, 1, (1, usize::MAX - 1), true, cx);
-            view.mono_hover(false, 1, 1, (1, 16), false, cx);
-            assert_eq!(view.hovered_turn.map(|(t, _)| t), Some(1));
-            view.mono_hover(false, 1, 1, (1, usize::MAX - 1), false, cx);
-            assert!(view.hovered_turn.is_none());
-        });
+        for mono in [false, true] {
+            let view = cx.new(|_| {
+                let mut view = TranscriptView::new();
+                if mono {
+                    view.mono_mode("cat", 0xe86b5f, "MonoCat");
+                }
+                view
+            });
+            view.update(cx, |view, cx| {
+                view.patch(
+                    0,
+                    vec![row("user", "Hi"), row("assistant", "Hello there")],
+                    cx,
+                );
+                for enter_first in [false, true] {
+                    view.message_hover(false, 1, 1, (1, 16), true, cx);
+                    view.hover_fades.get_mut(&(false, 1)).unwrap().since -=
+                        std::time::Duration::from_secs(1);
+                    assert_eq!(view.action_opacity(false, 1, false, cx), 1.);
+                    if enter_first {
+                        view.message_hover(false, 1, 1, (1, usize::MAX - 1), true, cx);
+                        view.message_hover(false, 1, 1, (1, 16), false, cx);
+                    } else {
+                        view.message_hover(false, 1, 1, (1, 16), false, cx);
+                        view.message_hover(false, 1, 1, (1, usize::MAX - 1), true, cx);
+                    }
+                    assert_eq!(view.hovered_turn, Some(1));
+                    assert!(view.action_opacity(false, 1, false, cx) > 0.9);
+                    view.message_hover(false, 1, 1, (1, usize::MAX - 1), false, cx);
+                    assert!(view.hovered_turn.is_none());
+                    assert!(view.chat_animating());
+                    view.hover_fades.get_mut(&(false, 1)).unwrap().since -=
+                        std::time::Duration::from_secs(1);
+                    assert_eq!(view.action_opacity(false, 1, false, cx), 0.);
+                    assert!(!view.chat_animating());
+                }
+            });
+        }
     }
 
     #[gpui::test]
