@@ -2,7 +2,6 @@
 //! sessions, across every project.
 use super::*;
 
-const LIVE_AGENT_MIN: usize = 2;
 const LIVE_AGENT_CAP: usize = 4;
 // Tailwind amber-400 and emerald-400.
 const AMBER: u32 = 0xfbbf24;
@@ -97,7 +96,7 @@ impl Shell {
         } else {
             Vec::new()
         };
-        let shown = agents.len() >= LIVE_AGENT_MIN;
+        let shown = !agents.is_empty();
         self.live_marks
             .retain(|id, _| shown && agents.iter().any(|a| a.id == *id && !a.done));
         let ticking = shown && agents.iter().any(|a| !a.done && a.started_at.is_some());
@@ -124,6 +123,9 @@ impl Shell {
                     let result = this.update(cx, |this, cx| {
                         if crate::pulse::app_active(cx) {
                             this.notify_sidebar(cx);
+                            if this.workspace.classic_layout && this.workspace.project_rail_open {
+                                this.projects_frame.update(cx, |_, cx| cx.notify());
+                            }
                         }
                     });
                     if result.is_err() {
@@ -150,7 +152,11 @@ impl Shell {
                 .id("live-agents")
                 .debug_selector(|| "sidebar-activity-card".into())
                 .role(Role::Group)
-                .aria_label(format!("{count} working agents"))
+                .aria_label(if count == 1 {
+                    "1 working agent".to_owned()
+                } else {
+                    format!("{count} working agents")
+                })
                 .flex_shrink_0()
                 .px_2()
                 .when(self.workspace.boxy_layout(), |d| d.pb_2())
@@ -386,5 +392,173 @@ impl Shell {
                 cx.notify();
             }))
             .into_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext, WindowHandle};
+
+    fn set_working(
+        window: WindowHandle<Shell>,
+        visual: &mut VisualTestContext,
+        session_id: i64,
+        working: bool,
+    ) {
+        window
+            .update(visual, |shell, _, cx| {
+                shell.sessions[&session_id].update(cx, |session, cx| {
+                    session.busy = working;
+                    cx.emit(SessionChanged);
+                });
+            })
+            .unwrap();
+        visual.run_until_parked();
+    }
+
+    fn assert_activity(
+        window: WindowHandle<Shell>,
+        visual: &mut VisualTestContext,
+        count: usize,
+        working_count: usize,
+    ) {
+        assert_eq!(
+            visual.debug_bounds("sidebar-activity-card").is_some(),
+            count > 0
+        );
+        window
+            .update(visual, |shell, _, cx| {
+                assert_eq!(shell.live_agents(cx).len(), count);
+                assert_eq!(shell.live_marks.len(), working_count);
+                assert_eq!(shell.live_tick.is_some(), working_count > 0);
+                if count == 0 {
+                    assert!(!shell.live_agents_expanded);
+                }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn activity_count_transitions_refresh_every_sidebar_layout(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (window, first_id, second_id) = super::super::tests::window(cx);
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        for (classic, boxy, project_rail_open) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, false, true),
+        ] {
+            window
+                .update(visual, |shell, _, cx| {
+                    shell.workspace.classic_layout = classic;
+                    shell.workspace.new_layout_boxy = boxy;
+                    shell.workspace.project_rail_open = project_rail_open;
+                    for session_id in [first_id, second_id] {
+                        shell.sessions[&session_id].update(cx, |session, cx| {
+                            session.transcript.update(cx, |transcript, cx| {
+                                transcript.patch(
+                                    0,
+                                    vec![monocode_core::transcript::Row {
+                                        role: "user".into(),
+                                        text: "Check activity".into(),
+                                        first: true,
+                                        sent_at: Some(monocode_core::time::now_ms()),
+                                    }],
+                                    cx,
+                                );
+                            });
+                        });
+                    }
+                    shell.layout_changed(cx);
+                })
+                .unwrap();
+            visual.run_until_parked();
+            assert_activity(window, visual, 0, 0);
+
+            for (session_id, count) in [(second_id, 1), (first_id, 2)] {
+                set_working(window, visual, session_id, true);
+                assert_activity(window, visual, count, count);
+                let frame = window
+                    .read_with(visual, |shell, _| {
+                        if classic && project_rail_open {
+                            shell.projects_frame.clone()
+                        } else {
+                            shell.sidebar_frame.clone()
+                        }
+                    })
+                    .unwrap();
+                let renders = frame.read_with(visual, |frame, _| frame.renders);
+                visual
+                    .executor()
+                    .advance_clock(std::time::Duration::from_millis(1100));
+                visual.run_until_parked();
+                assert!(
+                    frame.read_with(visual, |frame, _| frame.renders) > renders,
+                    "timer refresh: classic={classic}, boxy={boxy}, project_rail_open={project_rail_open}, count={count}"
+                );
+            }
+
+            set_working(window, visual, first_id, false);
+            assert_activity(window, visual, 2, 1);
+            let finished = visual.debug_bounds("live-agent-1").unwrap();
+            visual.simulate_click(finished.center(), Default::default());
+            visual.run_until_parked();
+            assert_activity(window, visual, 1, 1);
+            window
+                .read_with(visual, |shell, _| {
+                    assert_eq!(shell.workspace.active, Some(first_id))
+                })
+                .unwrap();
+
+            set_working(window, visual, second_id, false);
+            assert_activity(window, visual, 1, 0);
+            let finished = visual.debug_bounds("live-agent-2").unwrap();
+            visual.simulate_click(finished.center(), Default::default());
+            visual.run_until_parked();
+            assert_activity(window, visual, 0, 0);
+
+            set_working(window, visual, second_id, true);
+            assert_activity(window, visual, 1, 1);
+            set_working(window, visual, second_id, false);
+            assert_activity(window, visual, 0, 0);
+        }
+    }
+
+    #[gpui::test]
+    fn activity_visibility_preferences_apply_to_one_working_agent(cx: &mut TestAppContext) {
+        let (window, _, session_id) = super::super::tests::window(cx);
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        set_working(window, visual, session_id, true);
+        for (activity_visible, working_agents, shown) in [
+            (true, true, true),
+            (false, true, false),
+            (true, true, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            window
+                .update(visual, |shell, _, cx| {
+                    shell.workspace.sidebar_activity_visible = activity_visible;
+                    shell.workspace.preferences.working_agents = working_agents;
+                    shell.invalidate_chrome(cx);
+                })
+                .unwrap();
+            visual.run_until_parked();
+            assert_eq!(
+                visual.debug_bounds("sidebar-activity-card").is_some(),
+                shown
+            );
+            window
+                .read_with(visual, |shell, cx| {
+                    assert!(shell.sessions[&session_id].read(cx).responding());
+                    assert_eq!(shell.live_marks.contains_key(&session_id), shown);
+                })
+                .unwrap();
+        }
     }
 }
