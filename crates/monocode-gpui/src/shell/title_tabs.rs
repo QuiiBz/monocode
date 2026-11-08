@@ -84,7 +84,7 @@ impl Shell {
             .filter(|tab| match tab {
                 TitleTab::Search => !self.workspace.preferences.search_panel,
                 TitleTab::App(view) => {
-                    !self.workspace.classic_layout
+                    (!self.workspace.classic_layout || *view == app_views::AppView::Settings)
                         && (*view != app_views::AppView::Notes || self.workspace.preferences.notes)
                 }
                 TitleTab::Session(tab) => {
@@ -191,6 +191,16 @@ impl Shell {
                 app_views::AppView::Inbox => self.open_inbox(window, cx),
                 app_views::AppView::Notes => self.open_notes(window, cx),
                 app_views::AppView::Automations => self.open_automations(window, cx),
+                app_views::AppView::Settings => {
+                    let section = self
+                        .saved_settings
+                        .as_ref()
+                        .or(self.settings.as_ref())
+                        .map_or(crate::settings::Section::General, |view| {
+                            view.read(cx).section
+                        });
+                    self.open_settings(section, window, cx);
+                }
             },
             TitleTab::Session(id) => {
                 let focus = self.workspace.tab_focus(*id);
@@ -357,6 +367,9 @@ impl Shell {
                 && self.active_app_view == Some(*view)
             {
                 self.leave_app_views(cx);
+            }
+            if *tab == TitleTab::App(app_views::AppView::Settings) {
+                self.release_settings(cx);
             }
             if *tab == TitleTab::Search {
                 self.leave_app_search(cx);

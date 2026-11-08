@@ -892,13 +892,11 @@ impl SettingsView {
     }
 }
 
-/// SettingsNav: the rail body while Settings is open. The search heads it,
-/// the pages scroll beneath, and Back to app sits at the bottom.
+/// Settings navigation with search above the scrollable page list.
 pub(crate) fn nav(
     section: Section,
     search: AnyElement,
     select: impl Fn(Section, &mut Window, &mut App) + Clone + 'static,
-    back: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let row = |id: SharedString, label: &'static str, path: &'static str, active: bool| {
         div()
@@ -999,59 +997,6 @@ pub(crate) fn nav(
                         }))
                 }))
                 .into_any_element(),
-        )
-        .child(
-            div()
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .items_start()
-                .px_2()
-                .pt_1()
-                .pb_2()
-                .child(
-                    div()
-                        .id("settings-nav-back")
-                        .debug_selector(|| "settings-nav-back".into())
-                        .group("settings-nav-back")
-                        .role(Role::Button)
-                        .aria_label("Back to app")
-                        .flex()
-                        .items_center()
-                        // The nav rows' inset, icon column and gap, so the
-                        // chevron and label line up with theirs.
-                        .gap_2()
-                        .h(px(30.))
-                        .px_2()
-                        .rounded_full()
-                        .text_color(content(0.35))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
-                        .child(
-                            div()
-                                .size(px(16.))
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    icon("chevron-left", 14.)
-                                        .text_color(content(0.35))
-                                        .group_hover("settings-nav-back", |s| {
-                                            s.text_color(content(1.))
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .pr_1()
-                                .text_size(px(13.))
-                                .line_height(px(16.))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child("Back to app"),
-                        )
-                        .on_click(move |_, window, cx| back(window, cx)),
-                ),
         )
         .into_any_element()
 }

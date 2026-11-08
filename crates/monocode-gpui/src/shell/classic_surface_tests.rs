@@ -961,9 +961,6 @@ fn assert_settings_navigation(classic: bool, cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.refresh().unwrap();
 
-    // The toggle steps aside but keeps its slot, so the title bar holds
-    // still, and the shortcut can't hide what Settings put in the sidebar's
-    // place.
     let toggle = visual.debug_bounds("toggle-sidebar").unwrap();
     assert_eq!(toggle.size.width, px(24.));
     visual.dispatch_action(ToggleSidebar);
@@ -971,8 +968,8 @@ fn assert_settings_navigation(classic: bool, cx: &mut TestAppContext) {
     window
         .read_with(visual, |shell, _| {
             assert!(shell.settings.is_some());
-            assert!(shell.workspace.sidebar_visible);
-            assert!(shell.workspace.project_rail_open);
+            assert_eq!(shell.workspace.sidebar_visible, classic);
+            assert_eq!(shell.workspace.project_rail_open, !classic);
         })
         .unwrap();
 
