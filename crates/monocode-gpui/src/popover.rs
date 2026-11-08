@@ -645,9 +645,15 @@ impl Element for Placed {
             viewport,
             &self.options,
         );
-        let top = placed.top.unwrap_or_else(|| {
-            viewport.1 - placed.bottom.unwrap_or(0.) - height.min(placed.max_height)
-        });
+        let top = placed
+            .top
+            .unwrap_or_else(|| viewport.1 - placed.bottom.unwrap_or(0.) - height);
+        // Placement can allow less room than the measured frame needs.
+        let top = clamp(
+            top,
+            self.options.padding,
+            viewport.1 - height - self.options.padding,
+        );
         let target = if matches!(self.anchor, Anchor::Center) {
             point(
                 px(((viewport.0 - f32::from(surface.width)) / 2.).max(0.)).round(),

@@ -65,8 +65,6 @@ impl UsageFooter {
                 .child(
                     div()
                         .id("banked-reset-cards")
-                        .max_h(px(224.))
-                        .overflow_y_scroll()
                         .mt_2()
                         .flex()
                         .flex_col()
@@ -119,11 +117,10 @@ impl UsageFooter {
             Some(at) if at <= now => "Expires now".into(),
             Some(at) => format!("Expires in {}", usage::duration(at - now)),
         };
+        let selector = format!("banked-reset-{}", row.key);
         div()
-            .id(gpui::SharedString::from(format!(
-                "banked-reset-{}",
-                row.key
-            )))
+            .id(gpui::SharedString::from(selector.clone()))
+            .debug_selector(move || selector.clone())
             .flex_shrink_0()
             .rounded_lg()
             .bg(content(0.045))
