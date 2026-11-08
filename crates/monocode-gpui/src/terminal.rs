@@ -334,7 +334,7 @@ impl Terminal {
         }
     }
 
-    fn on_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
+    pub(super) fn on_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         match event {
             TermEvent::Wakeup | TermEvent::MouseCursorDirty | TermEvent::CursorBlinkingChange => {
                 cx.notify()
