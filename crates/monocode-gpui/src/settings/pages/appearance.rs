@@ -262,6 +262,66 @@ impl SettingsView {
             translucency,
         ));
         page.push(self.chat_background_card(cx));
+        let installed_fonts = crate::fonts::installed(cx);
+        let mut font_options = vec![(String::new(), "Default".into(), None)];
+        font_options.extend(
+            installed_fonts
+                .iter()
+                .cloned()
+                .map(|family| (family.clone(), family.into(), None)),
+        );
+        let size_options = (16..=64)
+            .map(|half_points| {
+                let size = half_points as f32 / 2.;
+                (size.to_string(), format!("{size} px").into(), None)
+            })
+            .collect();
+        let typography_rows = vec![
+            self.row(
+                Some("content-font"),
+                false,
+                "Font",
+                Some("The font used in terminals and code review content.".into()),
+                vec![self.select(
+                    "content-font",
+                    "Font",
+                    &p.terminal_font_family,
+                    font_options,
+                    Some(220.),
+                    cx,
+                    |this, family, cx| {
+                        this.update(cx, |preferences| {
+                            preferences.terminal_font_family = family.clone();
+                            preferences.review_font_family = family;
+                        })
+                    },
+                )],
+            ),
+            self.row(
+                Some("content-font-size"),
+                false,
+                "Font size",
+                Some("The text size in terminals and code review content, in pixels.".into()),
+                vec![self.select(
+                    "content-font-size",
+                    "Font size",
+                    &p.terminal_font_size.to_string(),
+                    size_options,
+                    None,
+                    cx,
+                    |this, value, cx| {
+                        if let Ok(size) = value.parse::<f32>() {
+                            this.update(cx, |preferences| {
+                                preferences.terminal_font_size = size;
+                                preferences.review_font_size = size;
+                            });
+                        }
+                    },
+                )],
+            ),
+        ];
+        page.push(self.group(None, false, "Fonts", None, None, typography_rows));
+
         let scale_options = UI_SCALE_PERCENTS
             .iter()
             .map(|percent| {

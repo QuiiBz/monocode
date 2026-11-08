@@ -1851,6 +1851,12 @@ impl Element for InputElement {
 }
 impl Render for Input {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let review_family = self.code.as_ref().map(|_| {
+            let (family, size) = crate::fonts::review(cx);
+            self.font_size = size;
+            self.line_height = size * 1.6;
+            family
+        });
         div()
             .id("native-composer")
             .relative()
@@ -1874,7 +1880,7 @@ impl Render for Input {
                 "Composer"
             })
             .when(self.code.is_some(), |d| {
-                d.h_full().font_family(crate::fonts::mono())
+                d.h_full().font_family(review_family.clone().unwrap())
             })
             .track_focus(&self.focus)
             .cursor(if self.code_rail_hovered() {

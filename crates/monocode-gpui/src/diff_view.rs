@@ -294,6 +294,7 @@ pub(crate) struct DiffView {
     scroll_x: f32,
     viewport: Rc<Cell<Option<Bounds<Pixels>>>>,
     char_width: Cell<Option<f32>>,
+    typography: (String, f32),
     hovered: Option<usize>,
     pending: Option<usize>,
     focus_id: Option<SharedString>,
@@ -321,6 +322,8 @@ impl Focusable for DiffView {
 
 impl DiffView {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<crate::settings::Preferences>(|_, cx| cx.notify())
+            .detach();
         let list = ListState::new(0, ListAlignment::Top, px(600.));
         let weak = cx.weak_entity();
         list.set_scroll_handler(move |_, _, cx| {
@@ -346,6 +349,7 @@ impl DiffView {
             list,
             scroll_x: 0.,
             viewport: Rc::default(),
+            typography: crate::fonts::review(cx),
             char_width: Cell::new(None),
             hovered: None,
             pending: None,
@@ -462,6 +466,11 @@ impl DiffView {
             if expanded {
                 rows.extend(body.rows.iter().map(|row| Row {
                     file: index,
+                    height: if matches!(row.kind, RowKind::Line { .. }) {
+                        self.line_height()
+                    } else {
+                        row.height
+                    },
                     ..row.clone()
                 }));
                 columns = columns.max(body.columns);
@@ -672,12 +681,15 @@ impl DiffView {
     fn gutter_width(&self) -> f32 {
         self.number_width * 2. + 24. + 3.
     }
+    fn line_height(&self) -> f32 {
+        LINE * self.typography.1 / CODE_SIZE
+    }
     fn char_width(&self, window: &mut Window) -> f32 {
         if let Some(width) = self.char_width.get() {
             return width;
         }
         let mut font = window.text_style().font();
-        font.family = crate::fonts::mono().into();
+        font.family = self.typography.0.clone().into();
         let run = gpui::TextRun {
             len: 10,
             font,
@@ -688,7 +700,7 @@ impl DiffView {
         };
         let width = window
             .text_system()
-            .shape_line("0000000000".into(), px(CODE_SIZE), &[run], None)
+            .shape_line("0000000000".into(), px(self.typography.1), &[run], None)
             .width
             .as_f32()
             / 10.;
@@ -717,7 +729,7 @@ impl DiffView {
     fn wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
         use gpui::TouchPhase;
         self.pending = None;
-        let delta = event.delta.pixel_delta(px(LINE));
+        let delta = event.delta.pixel_delta(px(self.line_height()));
         let (dx, dy) = if event.modifiers.shift && delta.x.abs() < px(0.5) {
             (delta.y, px(0.))
         } else {
@@ -1109,7 +1121,7 @@ impl DiffView {
             RowKind::Line { block, line, stage } => {
                 let file = &self.files[row.file];
                 let Some(l) = file.blocks.get(block).and_then(|b| b.lines().get(line)) else {
-                    return div().h(px(LINE)).into_any_element();
+                    return div().h(px(self.line_height())).into_any_element();
                 };
                 let (added, removed) = (l.kind == LineKind::Add, l.kind == LineKind::Del);
                 let ink: Option<Hsla> = if added {
@@ -1149,7 +1161,8 @@ impl DiffView {
                         .flex_shrink_0()
                         .pr_2()
                         .text_right()
-                        .text_size(px(11.))
+                        .font_family(self.typography.0.clone())
+                        .text_size(px(self.typography.1 * 11. / CODE_SIZE))
                         .font_features(tabular())
                         .when(hide, |d| d.invisible())
                         .child(n.map(|n| n.to_string()).unwrap_or_default())
@@ -1158,10 +1171,10 @@ impl DiffView {
                 let _ = window;
                 div()
                     .id(("diff-line", ix))
-                    .h(px(LINE))
+                    .h(px(self.line_height()))
                     .w_full()
                     .flex()
-                    .line_height(px(LINE))
+                    .line_height(px(self.line_height()))
                     .when_some(ink, |d, ink| d.bg(ink.opacity(0.06)))
                     .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                         let next = if *hovering {
@@ -1282,8 +1295,8 @@ impl DiffView {
                                     .pl_3()
                                     .pr_6()
                                     .whitespace_nowrap()
-                                    .font_family(crate::fonts::mono())
-                                    .text_size(px(CODE_SIZE))
+                                    .font_family(self.typography.0.clone())
+                                    .text_size(px(self.typography.1))
                                     .text_color(content(0.92))
                                     .child(StyledText::new(text).with_highlights(styles)),
                             ),
@@ -1455,6 +1468,12 @@ fn tool_button(
 
 impl Render for DiffView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let typography = crate::fonts::review(cx);
+        if self.typography != typography {
+            self.typography = typography;
+            self.char_width.set(None);
+            self.rebuild(cx);
+        }
         if self.files.is_empty() {
             return div()
                 .id("diff-review")
@@ -1945,5 +1964,38 @@ mod tests {
             RowKind::Notice(t) if t.as_ref() == "Binary file changed")
         );
         assert_eq!(expand_tabs("\tab\tc"), "    ab  c");
+    }
+}
+
+#[cfg(test)]
+mod typography_live_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn typography_updates_current_and_new_reviews(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences::default());
+            cx.open_window(Default::default(), |_, cx| cx.new(DiffView::new))
+                .unwrap()
+        });
+        window
+            .update(cx, |view, _, _| assert_eq!(view.typography.1, 12.5))
+            .unwrap();
+        cx.update(|cx| {
+            cx.update_global::<crate::settings::Preferences, _>(|preferences, _| {
+                preferences.review_font_size = 20.;
+                preferences.terminal_font_size = 9.;
+                preferences.review_font_family = "Unavailable test font".into();
+            });
+        });
+        window
+            .update(cx, |view, window, cx| {
+                drop(view.render(window, cx));
+                assert_eq!(view.typography, (crate::fonts::mono().to_owned(), 20.));
+                assert_eq!(view.line_height(), 32.);
+                let fresh = DiffView::new(cx);
+                assert_eq!(fresh.typography, view.typography);
+            })
+            .unwrap();
     }
 }

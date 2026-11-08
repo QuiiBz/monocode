@@ -59,7 +59,6 @@ pub(crate) fn bind(cx: &mut App) {
     ]);
 }
 
-const FONT_SIZE: f32 = 13.;
 /// TerminalView's `scrollback`, retained for every open terminal.
 const SCROLLBACK: usize = 2000;
 const PADDING: f32 = 8.;
@@ -248,6 +247,8 @@ fn detached(size: GridSize) -> Spawned {
 
 impl Terminal {
     pub(crate) fn new(cwd: String, cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<crate::settings::Preferences>(|_, cx| cx.notify())
+            .detach();
         let size = GridSize {
             columns: 80,
             lines: 24,
@@ -825,7 +826,11 @@ impl Element for Grid {
         window: &mut Window,
         cx: &mut App,
     ) -> Painted {
-        let font_size = px(FONT_SIZE);
+        let font_size = px(crate::settings::preferences::valid_font_size(
+            cx.try_global::<crate::settings::Preferences>()
+                .map_or(13., |preferences| preferences.terminal_font_size),
+            13.,
+        ));
         let base = crate::fonts::terminal(cx);
         let text_system = window.text_system().clone();
         let font_id = text_system.resolve_font(&base);

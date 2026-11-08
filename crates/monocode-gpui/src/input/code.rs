@@ -157,6 +157,18 @@ impl Code {
 }
 impl Input {
     pub(crate) fn editor(cx: &mut Context<Self>) -> Self {
+        let mut typography = crate::fonts::review(cx);
+        cx.observe_global::<crate::settings::Preferences>(move |this, cx| {
+            let updated_typography = crate::fonts::review(cx);
+            if typography != updated_typography {
+                typography = updated_typography;
+                if let Some(code) = &mut this.code {
+                    code.layout_width = None;
+                }
+                cx.notify();
+            }
+        })
+        .detach();
         let mut input = Self::new(cx);
         input.code = Some(Code::new());
         input.code.as_mut().unwrap().wrap = cx
@@ -1349,7 +1361,7 @@ fn plain_line(
             px(font_size),
             &[TextRun {
                 len: text.len(),
-                font: gpui::font(crate::fonts::mono()),
+                font: w.text_style().font(),
                 color,
                 background_color: None,
                 underline: None,
@@ -1370,7 +1382,7 @@ fn token_line(
 ) -> WrappedLine {
     let base = TextRun {
         len: 0,
-        font: gpui::font(crate::fonts::mono()),
+        font: w.text_style().font(),
         color: crate::theme::content(1.),
         background_color: None,
         underline: None,
@@ -1419,7 +1431,7 @@ fn shape(i: &Input, row: usize, width: Option<Pixels>, w: &mut Window) -> Wrappe
     };
     let base = TextRun {
         len: text.len(),
-        font: gpui::font(crate::fonts::mono()),
+        font: w.text_style().font(),
         color: crate::theme::content(1.),
         background_color: None,
         underline: None,
@@ -1619,7 +1631,7 @@ impl Element for CodeElement {
                     px(i.font_size),
                     &[TextRun {
                         len: 1,
-                        font: gpui::font(crate::fonts::mono()),
+                        font: w.text_style().font(),
                         color: crate::theme::content(1.),
                         background_color: None,
                         underline: None,
@@ -1910,7 +1922,7 @@ impl Element for CodeElement {
                             } else {
                                 "⌄".len()
                             },
-                            font: gpui::font(crate::fonts::mono()),
+                            font: w.text_style().font(),
                             color: crate::theme::content(0.45),
                             background_color: None,
                             underline: None,
@@ -1938,7 +1950,7 @@ impl Element for CodeElement {
                     px(11.),
                     &[TextRun {
                         len,
-                        font: gpui::font(crate::fonts::mono()),
+                        font: w.text_style().font(),
                         color: crate::theme::content(0.3),
                         background_color: None,
                         underline: None,
@@ -2503,6 +2515,50 @@ mod feature_tests {
                 assert_eq!(code.deleted_rows[0].2, "const value = 1;");
                 assert_eq!(code.tops[0], TOP_PADDING + i.line_height);
                 assert_eq!(i.content.as_ref(), "const value = 2;\n");
+            })
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod typography_live_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn editor_updates_current_and_new_content(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences::default());
+            cx.open_window(Default::default(), |_, cx| cx.new(Input::editor))
+                .unwrap()
+        });
+        window
+            .update(cx, |input, _, _| {
+                input.code.as_mut().unwrap().layout_width = Some(px(400.));
+            })
+            .unwrap();
+        cx.update(|cx| {
+            cx.update_global::<crate::settings::Preferences, _>(|preferences, _| {
+                preferences.sounds = !preferences.sounds;
+            });
+        });
+        window
+            .update(cx, |input, _, _| {
+                assert_eq!(input.code.as_ref().unwrap().layout_width, Some(px(400.)));
+            })
+            .unwrap();
+        cx.update(|cx| {
+            cx.update_global::<crate::settings::Preferences, _>(|preferences, _| {
+                preferences.review_font_size = 18.;
+            });
+        });
+        window
+            .update(cx, |input, window, cx| {
+                drop(input.render(window, cx));
+                assert_eq!(input.font_size, 18.);
+                assert!((input.line_height - 28.8).abs() < 0.001);
+                let mut fresh = Input::editor(cx);
+                drop(fresh.render(window, cx));
+                assert_eq!(fresh.font_size, input.font_size);
             })
             .unwrap();
     }
