@@ -45,6 +45,7 @@ mod sidebar_list;
 mod sidebar_peek;
 mod space_reorder;
 mod terminal_dock;
+mod terminal_lifecycle;
 mod terminal_panes;
 use terminal_panes::terminal_drag_ghost;
 mod title_tabs;
@@ -3066,8 +3067,10 @@ impl Shell {
     }
     fn spawn_terminal(&mut self, cwd: String, cx: &mut Context<Self>) -> Entity<Terminal> {
         let terminal = cx.new(|cx| Terminal::new(cwd, cx));
-        self.observations
-            .push(cx.subscribe(&terminal, |_, _, _: &TerminalEvent, cx| cx.notify()));
+        self.observations.push(cx.subscribe(
+            &terminal,
+            |shell, terminal, _: &TerminalEvent, cx| shell.terminal_changed(terminal, cx),
+        ));
         terminal
     }
     /// A restored dock reopens its tabs as fresh shells once it is shown.
@@ -3285,11 +3288,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let had_focus = self.dock_focused(window, cx).is_some();
+        let had_focus = self
+            .terminals
+            .get(project)
+            .and_then(|terminals| terminals.get(ix))
+            .is_some_and(|terminal| terminal.focus_handle(cx).contains_focused(window, cx));
         if let Some(live) = self.terminals.get_mut(project)
             && ix < live.len()
         {
-            live.remove(ix);
+            let terminal = live.remove(ix);
+            self.dock_shifts.remove(&terminal.entity_id());
         }
         let Some(dock) = self.workspace.docks.get_mut(project) else {
             return;
@@ -3297,11 +3305,16 @@ impl Shell {
         if !dock.close(ix) {
             // The last terminal closes the dock; it slides shut empty.
             dock.open = false;
-            self.slide_dock(false, cx);
-            if had_focus {
-                self.focus_active(window, cx);
+            if project == self.workspace.project {
+                self.slide_dock(false, cx);
+                if self.panel_terminal_shown(cx) {
+                    self.set_right_panel_open(false, window, cx);
+                }
+                if had_focus {
+                    self.focus_active(window, cx);
+                }
+                self.fit_sidebar(cx);
             }
-            self.fit_sidebar(cx);
         } else if had_focus {
             self.focus_terminal(window, cx);
         }
@@ -8498,6 +8511,7 @@ fn enter_from(leaf: &LayoutLeaf) -> (Edge, Rect) {
 }
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.defer_exited_terminals(window, cx);
         self.keep_visible_idle_agents(cx);
         self.sync_ui_scale(window, cx);
         if self.mono_panes_unsettled(cx) {
