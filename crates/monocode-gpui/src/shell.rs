@@ -640,9 +640,6 @@ pub(crate) struct Shell {
     sidebar_list: sidebar_list::SidebarList,
     sidebar_slide: Option<PaneSlide>,
     sidebar_fraction: f32,
-    /// Settings' own nav collapse, apart from the project sidebar's saved
-    /// state; every visit to Settings starts with it open.
-    settings_nav_visible: bool,
     /// The collapsed inset sidebar peeking out over the workspace.
     sidebar_peek: Option<sidebar_peek::SidebarPeek>,
     peek_animating: bool,
@@ -722,6 +719,7 @@ pub(crate) struct Shell {
     app_view_events: Vec<Subscription>,
     automation_state: automation_runs::State,
     settings: Option<Entity<crate::settings::SettingsView>>,
+    saved_settings: Option<Entity<crate::settings::SettingsView>>,
     settings_events: Option<Subscription>,
     settings_overlay_watch: Option<Subscription>,
     app_search: Option<search::Open>,
@@ -1040,7 +1038,6 @@ impl Shell {
             sidebar_list: sidebar_list::SidebarList::new(cx),
             sidebar_slide: None,
             sidebar_fraction: if workspace.sidebar_visible { 1. } else { 0. },
-            settings_nav_visible: true,
             sidebar_peek: None,
             peek_animating: false,
             peek_close: None,
@@ -1107,6 +1104,7 @@ impl Shell {
             app_view_events: Vec::new(),
             automation_state: Default::default(),
             settings: None,
+            saved_settings: None,
             settings_events: None,
             settings_overlay_watch: None,
             app_search: None,
@@ -4384,15 +4382,6 @@ impl Shell {
         if self.workspace.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
             self.focus_workspace(window, cx);
         }
-        if self.settings.is_some() {
-            let visible = !self.settings_nav_visible;
-            self.slide_sidebar(visible, cx);
-            self.settings_nav_visible = visible;
-            // Search moves between the nav and the title bar.
-            self.invalidate_chrome(cx);
-            cx.notify();
-            return;
-        }
         self.sidebar_auto_hidden = false;
         self.set_sidebar_visible(!self.workspace.sidebar_visible, cx);
         self.persist(cx);
@@ -4705,7 +4694,7 @@ impl Shell {
     fn navigation_width(&self) -> f32 {
         let closed = self.traffic_lights() + 3. * 24.;
         if self.workspace.classic_layout {
-            return if self.workspace.project_rail_open || self.settings.is_some() {
+            return if self.workspace.project_rail_open {
                 self.project_rail_drawn_width().max(closed + 6.)
             } else {
                 closed
@@ -4730,7 +4719,7 @@ impl Shell {
             // `pr-1.5` only beside the open sidebar; closed, the tab
             // strip's own inset is gap enough after the arrows.
             .pr(px(if self.workspace.classic_layout {
-                if self.workspace.project_rail_open || self.settings.is_some() {
+                if self.workspace.project_rail_open {
                     6.
                 } else {
                     0.
@@ -4778,17 +4767,7 @@ impl Shell {
                 .on_click(cx.listener(|this, _, window, cx| this.visit(1, window, cx))),
             )
     }
-    /// The classic layout's settings fill the project rail, so its toggle
-    /// steps aside. Its slot stays, so nothing beside it moves.
     fn sidebar_toggle(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        if self.settings.is_some() && self.workspace.classic_layout {
-            return div()
-                .id("toggle-sidebar")
-                .debug_selector(|| "toggle-sidebar".into())
-                .flex_shrink_0()
-                .size(px(24.))
-                .child(self.peek_toggle_bounds.probe());
-        }
         icon_button("toggle-sidebar", TOGGLE_SIDEBAR_LABEL, "sidebar")
             .debug_selector(|| "toggle-sidebar".into())
             .child(self.peek_toggle_bounds.probe())
@@ -4981,37 +4960,6 @@ impl Shell {
     fn titlebar_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Same hierarchy as TitleBar.tsx's inset layout: window navigation and
         // session tabs share the outer shell, above the rounded workspace card.
-        // Windows' controls sit in the settings header's padding, so its
-        // bottom rule still runs beneath them. Session bars leave them to the
-        // corner (`toggle_room`, `corner_room`).
-        let controls = px(self.window_controls);
-        if let Some(settings) = self.settings.clone() {
-            let classic = self.workspace.boxy_layout();
-            let lead = if classic {
-                self.strip_lead(cx)
-            } else {
-                self.navigation_width() + 6.
-            };
-            let search = !self.workspace.classic_layout && !self.settings_nav_visible;
-            let header = settings.update(cx, |v, cx| v.header(!classic, search, cx));
-            return div()
-                .h(px(TITLE_BAR_HEIGHT))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .pr(controls)
-                .when(classic, |d| d.border_b_1().border_color(content(0.1)))
-                .child(if classic {
-                    titlebar_drag_area()
-                        .w(px(lead))
-                        .flex_shrink_0()
-                        .into_any_element()
-                } else {
-                    self.navigation(cx).into_any_element()
-                })
-                .child(header)
-                .into_any_element();
-        }
         let tabs_width = px(self.tabs_width(window, cx));
         let classic = self.workspace.boxy_layout();
         div()
@@ -6780,22 +6728,6 @@ impl Shell {
         }
     }
     fn sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(settings) = self.settings.clone() {
-            let section = settings.read(cx).section;
-            let search = settings.update(cx, |v, cx| v.search_field(true, cx));
-            let select = cx.weak_entity();
-            let back = select.clone();
-            return crate::settings::nav(
-                section,
-                search,
-                move |section, _, cx| {
-                    let _ = select.update(cx, |this, cx| this.select_settings(section, cx));
-                },
-                move |window, cx| {
-                    let _ = back.update(cx, |this, cx| this.close_settings(window, cx));
-                },
-            );
-        }
         if self.workspace.classic_layout {
             return self.classic_sidebar(cx);
         }
@@ -8672,18 +8604,13 @@ impl Render for Shell {
                 fraction
             }
             None => {
-                let visible = if self.settings.is_some() {
-                    self.settings_nav_visible
+                if self.workspace.sidebar_visible {
+                    1.
                 } else {
-                    self.workspace.sidebar_visible
-                };
-                if visible { 1. } else { 0. }
+                    0.
+                }
             }
         };
-        // The classic layout's settings nav is the project rail, which stays.
-        if self.settings.is_some() && self.workspace.classic_layout {
-            self.sidebar_fraction = 1.;
-        }
         let sidebar_width = self.workspace.sidebar_width * self.sidebar_fraction;
         if !self.window_observed {
             self.window_observed = true;
@@ -8952,8 +8879,8 @@ impl Render for Shell {
                 {
                     return;
                 }
-                if let Some(view) = this.active_app_view.filter(|_| this.settings.is_none()) {
-                    if this.workspace.classic_layout {
+                if let Some(view) = this.active_app_view {
+                    if this.workspace.classic_layout && view != app_views::AppView::Settings {
                         this.close_app_view(window, cx);
                     } else {
                         this.close_title_tabs(&[TitleTab::App(view)], None, window, cx);
