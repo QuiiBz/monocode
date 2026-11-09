@@ -7,6 +7,7 @@ mod changes_shelf;
 mod commands;
 pub(crate) mod composer_features;
 mod composer_shelf;
+mod context_usage;
 mod edit_last_turn;
 mod follow_up;
 pub(crate) mod git_actions;
@@ -208,6 +209,7 @@ pub(crate) struct Conversation {
     preparing_worktree: bool,
     context: Option<monocode_core::context::Usage>,
     context_hovered: bool,
+    session_usage: context_usage::State,
     /// The submit button's morph between square and labelled pill.
     send_morph: std::cell::RefCell<crate::send_morph::Morph>,
     /// ⌘ (Ctrl elsewhere) as last seen, which flips Queue and Steer.
@@ -666,6 +668,7 @@ impl Conversation {
             preparing_worktree: false,
             context: None,
             context_hovered: false,
+            session_usage: context_usage::State::default(),
             send_morph: Default::default(),
             send_alternate: false,
             menu: None,
@@ -1130,6 +1133,14 @@ impl Conversation {
         }
         settings.turn_model = Some(monocode_core::agent::TurnInfo {
             provider: self.summary.provider.clone(),
+            service_tier: Some(if settings.fast {
+                "fast".into()
+            } else {
+                settings
+                    .service_tier
+                    .clone()
+                    .unwrap_or_else(|| "default".into())
+            }),
             model: model_label.to_string(),
             model_id: self
                 .model_info()
@@ -1193,6 +1204,7 @@ impl Conversation {
         self.approvals.clear();
         self.questions.clear();
         let (tx, rx) = async_channel::bounded(8);
+        let turn_provenance = settings.turn_model.clone();
         let mut turn_model_id = settings
             .turn_model
             .as_ref()
@@ -1342,7 +1354,18 @@ impl Conversation {
                             this.context = Some(context);
                         }
                         if let Some(metrics) = update.metrics {
-                            this.transcript.update(cx, |v, _| v.metrics(metrics));
+                            this.transcript.update(cx, |view, _| {
+                                view.metrics(metrics);
+                                if let Some(turn) = view.active_turn()
+                                    && let Some(info) = view.turns.get_mut(&turn)
+                                {
+                                    info.model_id = turn_model_id.clone();
+                                    if let Some(provenance) = &turn_provenance {
+                                        info.started_at = info.started_at.or(provenance.started_at);
+                                        info.service_tier = provenance.service_tier.clone();
+                                    }
+                                }
+                            });
                         }
                         if update.turn_ready && !stopping {
                             this.follow_ups.ready = true;
@@ -3232,8 +3255,7 @@ impl Conversation {
                                 ))
                                 .child(self.context_anchor.probe())
                                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                    this.context_hovered = *hovered;
-                                    cx.notify();
+                                    this.hover_context(*hovered, cx);
                                 }))
                                 .child(crate::context_meter::ring(ratio.unwrap_or(0.)))
                                 .when(self.context_hovered, |d| {
@@ -3244,24 +3266,10 @@ impl Conversation {
                                         )
                                         .side(Side::Top)
                                         .align(Align::End)
-                                        .max_width(240.)
-                                        .padding(10.)
+                                        .width(340.)
+                                        .padding(12.)
                                         .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .text_size(px(12.))
-                                                .line_height(px(16.))
-                                                .text_color(content(1.))
-                                                .child(headline)
-                                                .when_some(detail, |d, detail| {
-                                                    d.child(
-                                                        div()
-                                                            .text_size(px(11.))
-                                                            .text_color(content(0.5))
-                                                            .child(detail),
-                                                    )
-                                                }),
+                                            context_usage::panel(self.context, &self.session_usage),
                                         ),
                                     )
                                 }),

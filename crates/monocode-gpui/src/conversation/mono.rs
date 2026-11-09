@@ -1369,8 +1369,7 @@ impl Conversation {
                             .hover(|s| s.bg(content(0.08)))
                             .child(self.context_anchor.probe())
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                this.context_hovered = *hovered;
-                                cx.notify();
+                                this.hover_context(*hovered, cx);
                             }))
                             .child(crate::context_meter::ring(ratio.unwrap_or(0.)))
                             .when(self.context_hovered, |d| {
@@ -1381,25 +1380,9 @@ impl Conversation {
                                     )
                                     .side(Side::Top)
                                     .align(Align::End)
-                                    .max_width(240.)
-                                    .padding(10.)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .text_size(px(12.))
-                                            .line_height(px(16.))
-                                            .text_color(content(1.))
-                                            .child(headline)
-                                            .when_some(detail, |d, detail| {
-                                                d.child(
-                                                    div()
-                                                        .text_size(px(11.))
-                                                        .text_color(content(0.5))
-                                                        .child(detail),
-                                                )
-                                            }),
-                                    ),
+                                    .width(340.)
+                                    .padding(12.)
+                                    .child(context_usage::panel(self.context, &self.session_usage)),
                                 )
                             }),
                     ),

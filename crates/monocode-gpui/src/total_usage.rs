@@ -777,7 +777,7 @@ fn metric(label: &str, value: String, detail: String, selected: bool) -> gpui::D
                 .child(detail),
         )
 }
-fn token_badge(index: usize) -> gpui::Div {
+pub(crate) fn token_badge(index: usize) -> gpui::Div {
     div()
         .size(px(6.))
         .flex_shrink_0()
@@ -785,7 +785,7 @@ fn token_badge(index: usize) -> gpui::Div {
         .bg(token_color(index))
 }
 
-fn token_color(index: usize) -> gpui::Hsla {
+pub(crate) fn token_color(index: usize) -> gpui::Hsla {
     match index {
         0 => gpui::rgb(0x729de0).into(),
         1 => gpui::rgb(0x70b7aa).into(),

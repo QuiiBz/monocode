@@ -1,5 +1,5 @@
 mod pricing;
-use crate::agent::TurnMetrics;
+use crate::agent::{TurnInfo, TurnMetrics};
 use chrono::{Days, Local, TimeZone};
 pub use pricing::{CLAUDE_SOURCE, Cost, GATEWAY_SOURCE, OPENAI_SOURCE, VERIFIED};
 use rusqlite::{Connection, OpenFlags};
@@ -14,6 +14,134 @@ pub const DAY: u64 = 86_400_000;
 pub struct Bucket {
     pub tokens: [u64; 4],
     pub costs: [Cost; 4],
+}
+impl Bucket {
+    pub fn from_blocks(
+        blocks: &[Value],
+        provider: &str,
+        live_turn: Option<&TurnInfo>,
+    ) -> Result<Self, String> {
+        let live_turn = live_turn.filter(|turn| turn.metrics.is_some());
+        let mut usage = Self::default();
+        let mut seen_receipts = HashSet::new();
+        for block in blocks {
+            usage.add_receipt(&mut seen_receipts, block, provider, live_turn)?;
+        }
+        usage.add_live_turn(live_turn);
+        Ok(usage)
+    }
+
+    pub(crate) fn add_receipt(
+        &mut self,
+        seen_receipts: &mut HashSet<String>,
+        block: &Value,
+        provider: &str,
+        live_turn: Option<&TurnInfo>,
+    ) -> Result<(), String> {
+        if block["role"] != "user" || !block["turnMetrics"].is_object() {
+            return Ok(());
+        }
+        if live_turn.is_some_and(|turn| {
+            turn.provider_turn_id
+                .as_deref()
+                .is_some_and(|identity| block["providerTurnId"] == identity)
+                || turn
+                    .started_at
+                    .is_some_and(|started| block["startedAt"].as_u64() == Some(started))
+        }) || block["startedAt"]
+            .as_u64()
+            .zip(block["sentAt"].as_u64())
+            .is_some_and(|(started, sent)| started.saturating_add(1000) < sent)
+        {
+            return Ok(());
+        }
+        let Some(identity) = block["providerTurnId"]
+            .as_str()
+            .or_else(|| block["id"].as_str())
+        else {
+            return Ok(());
+        };
+        if !seen_receipts.insert(identity.to_owned()) {
+            return Ok(());
+        }
+        let metrics = serde_json::from_value(block["turnMetrics"].clone())
+            .map_err(|error| error.to_string())?;
+        let complete = block["turnModel"]["id"].is_string()
+            && [
+                "inputTokens",
+                "outputTokens",
+                "cacheReadTokens",
+                "cacheWriteTokens",
+            ]
+            .iter()
+            .all(|key| block["turnMetrics"][key].as_u64().is_some());
+        self.add(
+            metrics,
+            block["turnModel"]["harness"].as_str().unwrap_or(provider),
+            block["turnModel"]["id"].as_str().unwrap_or(""),
+            complete,
+            block["turnModel"]["serviceTier"].as_str(),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn add_live_turn(&mut self, live_turn: Option<&TurnInfo>) {
+        let Some(turn) = live_turn else { return };
+        let Some(metrics) = turn.metrics else { return };
+        self.add(
+            metrics,
+            &turn.provider,
+            turn.model_id.as_deref().unwrap_or(""),
+            turn.model_id.is_some(),
+            turn.service_tier.as_deref(),
+        );
+    }
+
+    pub(crate) fn add(
+        &mut self,
+        metrics: TurnMetrics,
+        provider: &str,
+        model: &str,
+        complete: bool,
+        tier: Option<&str>,
+    ) {
+        let parts = [
+            if provider == "codex" {
+                metrics
+                    .input_tokens
+                    .saturating_sub(metrics.cache_read_tokens)
+            } else {
+                metrics.input_tokens
+            },
+            metrics.cache_read_tokens,
+            metrics.cache_write_tokens,
+            metrics.output_tokens,
+        ];
+        let amounts = if complete
+            && (provider != "codex" || metrics.cache_read_tokens <= metrics.input_tokens)
+        {
+            pricing::estimate_for_tier(provider, model, parts, tier)
+        } else {
+            [None; 4]
+        };
+        for (index, (count, amount)) in parts.into_iter().zip(amounts).enumerate() {
+            self.tokens[index] += count;
+            self.costs[index].add(count, amount);
+        }
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.tokens.iter().sum()
+    }
+
+    pub fn total_cost(&self) -> Cost {
+        Cost {
+            usd: self.costs.iter().map(|cost| cost.usd).sum(),
+            priced_tokens: self.costs.iter().map(|cost| cost.priced_tokens).sum(),
+            unpriced_tokens: self.costs.iter().map(|cost| cost.unpriced_tokens).sum(),
+            known: self.costs.iter().any(|cost| cost.known),
+        }
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct Summary {
@@ -181,19 +309,9 @@ fn add(
     complete: bool,
     tier: Option<&str>,
 ) {
-    let input = if provider == "codex" {
-        metrics
-            .input_tokens
-            .saturating_sub(metrics.cache_read_tokens)
-    } else {
-        metrics.input_tokens
-    };
-    let parts = [
-        input,
-        metrics.cache_read_tokens,
-        metrics.cache_write_tokens,
-        metrics.output_tokens,
-    ];
+    let mut receipt = Bucket::default();
+    receipt.add(metrics, provider, model, complete, tier);
+    let parts = receipt.tokens;
     let tokens = parts.iter().sum::<u64>();
     summary.tokens += tokens;
     summary.turns += 1;
@@ -236,12 +354,7 @@ fn add(
     summary
         .cost_trend
         .resize(summary.trend.len(), Cost::default());
-    let amounts =
-        if complete && (provider != "codex" || metrics.cache_read_tokens <= metrics.input_tokens) {
-            pricing::estimate_for_tier(provider, model, parts, tier)
-        } else {
-            [None; 4]
-        };
+    let amounts = receipt.costs.map(|cost| cost.known.then_some(cost.usd));
     for (index, (count, amount)) in parts.into_iter().zip(amounts).enumerate() {
         summary.buckets[bucket].tokens[index] += count;
         summary.buckets[bucket].costs[index].add(count, amount);

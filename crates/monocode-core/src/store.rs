@@ -12,6 +12,7 @@ pub(crate) use shared::handle as desktop_session_handle;
 mod session_metadata;
 pub use session_metadata::{MobileSessionMetadata, SessionSidebarMetadata};
 mod session_preview;
+mod session_usage;
 pub use session_preview::SessionPreviewData;
 mod edit;
 mod shared;

@@ -11,7 +11,7 @@ pub(super) struct State {
     pub(super) online: bool,
     error: Option<String>,
     rejected: Option<Value>,
-    snapshot: Option<Value>,
+    pub(super) snapshot: Option<Value>,
     pub(super) capabilities: std::collections::HashSet<String>,
 }
 impl State {
