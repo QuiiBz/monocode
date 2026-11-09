@@ -282,6 +282,17 @@ impl Shell {
         self.notify_sidebar(cx);
     }
     pub(super) fn project_groups(&self) -> Groups {
+        if !self.workspace.classic_layout {
+            let mut projects: Vec<_> = self.groups.keys().collect();
+            projects.sort();
+            return Groups {
+                folders: projects
+                    .into_iter()
+                    .flat_map(|project| self.groups[project].folders.clone())
+                    .collect(),
+                ..Default::default()
+            };
+        }
         self.groups
             .get(&self.workspace.project)
             .cloned()
@@ -292,6 +303,44 @@ impl Shell {
         cx: &mut Context<Self>,
         change: impl FnOnce(&mut Groups),
     ) {
+        if !self.workspace.classic_layout {
+            let mut groups = self.project_groups();
+            let owners: HashMap<_, _> = self
+                .groups
+                .iter()
+                .flat_map(|(project, groups)| {
+                    groups
+                        .folders
+                        .iter()
+                        .map(move |folder| (folder.id.clone(), project.clone()))
+                })
+                .collect();
+            change(&mut groups);
+            let mut updated = self.groups.clone();
+            for groups in updated.values_mut() {
+                groups.folders.clear();
+            }
+            for folder in groups.folders {
+                let project = owners.get(&folder.id).unwrap_or(&self.workspace.project);
+                updated
+                    .entry(project.clone())
+                    .or_default()
+                    .folders
+                    .push(folder);
+            }
+            for (project, groups) in updated {
+                if self.groups.get(&project) == Some(&groups) {
+                    continue;
+                }
+                self.groups.insert(project.clone(), groups.clone());
+                self.store_write("save folders", cx, move |store| {
+                    store.save_groups(&project, &groups)
+                });
+            }
+            self.invalidate_chrome(cx);
+            cx.notify();
+            return;
+        }
         let project = self.workspace.project.clone();
         let groups = self.groups.entry(project.clone()).or_default();
         change(groups);

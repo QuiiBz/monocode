@@ -222,7 +222,6 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::tests::window;
     use gpui::{Modifiers, TestAppContext, VisualTestContext, point};
 
     fn pull(visual: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>) {
@@ -243,7 +242,7 @@ mod tests {
     #[gpui::test]
     fn a_mono_tab_pulled_onto_a_pane_splits_and_returns_to_its_tab(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (window, _, first) = window(cx);
+        let (window, _, first) = crate::shell::tests::isolated_window(cx);
         window
             .update(cx, |shell, w, cx| {
                 shell
@@ -329,7 +328,7 @@ mod tests {
     #[gpui::test]
     fn a_tab_pulled_onto_the_visible_mono_splits_beside_it(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (window, _, first) = window(cx);
+        let (window, _, first) = crate::shell::tests::isolated_window(cx);
         window
             .update(cx, |shell, w, cx| {
                 shell

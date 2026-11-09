@@ -460,80 +460,52 @@ fn project_clicks_leave_monos_in_original_layout(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn new_layout_projects_restore_the_last_session_or_mono_tab(cx: &mut TestAppContext) {
+fn focused_project_icons_keep_the_current_tab_and_focus(cx: &mut TestAppContext) {
     for boxy in [false, true] {
-        let (window, _) = setup(cx, false, boxy);
-        let visual = &mut VisualTestContext::from_window(window.into(), cx);
-        let stable = |value: String| Box::leak(value.into_boxed_str()) as &'static str;
-        let mut targets = Vec::new();
-        for path in ["/work/monocode", "/work/another-project"] {
-            let target = window
-                .update(visual, |shell, window, cx| {
-                    shell.select_project(path.into(), window, cx);
-                    let session = shell.workspace.active.unwrap();
-                    Surface::Mono.open(shell, window, cx);
-                    let mono = shell.mono_manager().read(cx).active.clone().unwrap();
-                    let ix = shell
-                        .workspace
-                        .projects
-                        .iter()
-                        .position(|p| p == path)
-                        .unwrap();
-                    (stable(format!("project-space-{ix}")), session, mono)
-                })
-                .unwrap();
-            visual.run_until_parked();
-            targets.push(target);
-        }
-        let click = |selector: &'static str, visual: &mut VisualTestContext| {
-            visual.refresh().unwrap();
-            let bounds = visual.debug_bounds(selector).unwrap();
-            visual.simulate_click(bounds.center(), Default::default());
-            visual.run_until_parked();
-            visual.refresh().unwrap();
-        };
-        let assert_mono = |ix: usize, visual: &mut VisualTestContext| {
+        for surface in [
+            None,
+            Some(Surface::Mono),
+            Some(Surface::Notes),
+            Some(Surface::Search),
+        ] {
+            let (window, session) = setup(cx, false, boxy);
             window
-                .read_with(visual, |shell, cx| {
-                    assert_eq!(
-                        shell.mono_manager().read(cx).active.as_ref(),
-                        Some(&targets[ix].2)
-                    );
-                    assert!(
-                        shell
-                            .visible_tabs(cx)
-                            .contains(&shell.mono_tab(targets[ix].2.clone()))
-                    );
+                .update(cx, |shell, window, cx| {
+                    shell.sessions[&session]
+                        .update(cx, |session, _| session.summary.has_messages = true);
+                    if let Some(surface) = surface {
+                        surface.open(shell, window, cx);
+                    } else {
+                        shell.focus_active(window, cx);
+                    }
                 })
                 .unwrap();
-            assert!(
-                visual
-                    .debug_bounds(stable(format!("mono-title-tab-{}", targets[ix].2)))
-                    .is_some()
-            );
-        };
-        click(targets[0].0, visual);
-        assert_mono(0, visual);
-        click(stable(format!("title-tab-{}", targets[0].1)), visual);
-        click(targets[1].0, visual);
-        assert_mono(1, visual);
-        click(targets[0].0, visual);
-        window
-            .read_with(visual, |shell, cx| {
-                assert!(!shell.mono_active(cx));
-                assert_eq!(shell.workspace.active, Some(targets[0].1));
-            })
-            .unwrap();
-        click(stable(format!("mono-rail-{}", targets[0].2)), visual);
-        assert_mono(0, visual);
-        // Both same-project clicks and returning from another project restore
-        // a selected Mono in either new frame style.
-        click(targets[0].0, visual);
-        assert_mono(0, visual);
-        click(targets[1].0, visual);
-        assert_mono(1, visual);
-        click(targets[0].0, visual);
-        assert_mono(0, visual);
+            cx.run_until_parked();
+            let (active, tabs, focus) = window
+                .update(cx, |shell, window, cx| {
+                    shell.focus_workspace(window, cx);
+                    (
+                        shell.active_title_tab(cx),
+                        shell.visible_tabs(cx),
+                        window.focused(cx),
+                    )
+                })
+                .unwrap();
+            let visual = &mut VisualTestContext::from_window(window.into(), cx);
+            for selector in ["project-space-0", "project-space-1"] {
+                visual.refresh().unwrap();
+                let bounds = visual.debug_bounds(selector).unwrap();
+                visual.simulate_click(bounds.center(), Default::default());
+                visual.run_until_parked();
+                window
+                    .update(visual, |shell, window, cx| {
+                        assert_eq!(shell.active_title_tab(cx), active);
+                        assert_eq!(shell.visible_tabs(cx), tabs);
+                        assert!(focus.as_ref().is_some_and(|focus| focus.is_focused(window)), "surface={surface:?}, boxy={boxy}, selector={selector}, before={focus:?}, after={:?}", window.focused(cx));
+                    })
+                    .unwrap();
+            }
+        }
     }
 }
 

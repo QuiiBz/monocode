@@ -51,6 +51,14 @@ impl Shell {
     }
 
     pub(super) fn mono_tab(&self, id: String) -> TitleTab {
+        if !self.workspace.classic_layout
+            && let Some(tab) =
+                self.workspace.title_order.iter().find(
+                    |tab| matches!(tab, TitleTab::Mono { id: existing, .. } if existing == &id),
+                )
+        {
+            return tab.clone();
+        }
         TitleTab::Mono {
             id,
             project: self.workspace.project.clone(),
@@ -78,6 +86,7 @@ impl Shell {
     }
 
     fn scoped_tabs(&self, cx: &App) -> Vec<TitleTab> {
+        let mut listed_monos = HashSet::new();
         self.workspace
             .title_order
             .iter()
@@ -92,28 +101,27 @@ impl Shell {
                         let id = self.workspace.scope_pane(*tab);
                         self.session_summaries
                             .contains_key(&self.workspace.session_for_pane(id))
-                            && self
-                                .session_metadata(self.workspace.session_for_pane(id), cx)
-                                .summary
-                                .cwd
-                                == self.workspace.project
-                            && self.in_worktree_scope(id, cx)
+                            && (!self.workspace.classic_layout
+                                || (self
+                                    .session_metadata(self.workspace.session_for_pane(id), cx)
+                                    .summary
+                                    .cwd
+                                    == self.workspace.project
+                                    && self.in_worktree_scope(id, cx)))
                     }
                 }
-                TitleTab::Mono {
-                    id,
-                    project,
-                    worktree,
-                } => {
+                TitleTab::Mono { id, .. } => {
                     !self.workspace.classic_layout
-                        && *project == self.workspace.project
-                        && path_key(worktree) == path_key(self.working_copy())
                         && self.workspace.preferences.monos
                         && self
                             .monos
                             .as_ref()
                             .is_some_and(|m| m.read(cx).roster.get(id).is_some())
                 }
+            })
+            .filter(|tab| match tab {
+                TitleTab::Mono { id, .. } => listed_monos.insert(id.clone()),
+                _ => true,
             })
             .cloned()
             .collect()
@@ -228,7 +236,20 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         let tab = self.workspace.scope_focus.get(&self.tab_scope()).cloned();
-        if let Some(tab) = tab.filter(|tab| self.visible_tabs(cx).contains(tab)) {
+        if let Some(tab) = tab.filter(|tab| {
+            self.visible_tabs(cx).contains(tab)
+                && match tab {
+                    TitleTab::Session(tab) => {
+                        let pane = self.workspace.scope_pane(*tab);
+                        self.session_metadata(self.workspace.session_for_pane(pane), cx)
+                            .summary
+                            .cwd
+                            == self.workspace.project
+                            && self.in_worktree_scope(pane, cx)
+                    }
+                    _ => true,
+                }
+        }) {
             if matches!(tab, TitleTab::Mono { .. }) {
                 self.workspace.active = None;
             }
@@ -305,7 +326,23 @@ impl Shell {
             .filter_map(TitleTab::session)
             .flat_map(|id| self.workspace.layout(id).leaf_ids())
             .collect::<Vec<_>>();
-        let tabs = tabs.to_vec();
+        let mut tabs = tabs.to_vec();
+        if !self.workspace.classic_layout {
+            let mono_ids: HashSet<_> = tabs
+                .iter()
+                .filter_map(|tab| match tab {
+                    TitleTab::Mono { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            for tab in &self.workspace.title_order {
+                if matches!(tab, TitleTab::Mono { id, .. } if mono_ids.contains(id))
+                    && !tabs.contains(tab)
+                {
+                    tabs.push(tab.clone());
+                }
+            }
+        }
         self.confirm_close_terminal_panes(&panes, window, cx, move |this, window, cx| {
             this.finish_close_title_tabs(&tabs, preferred, window, cx);
         });
@@ -471,6 +508,81 @@ mod tests {
     }
 
     #[gpui::test]
+    fn focused_tabs_keep_projects_visible_after_selection_and_close(cx: &mut TestAppContext) {
+        let (window, first, second) = window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.workspace.classic_layout = false;
+                let tabs = shell.visible_tabs(cx);
+                assert!(tabs.contains(&TitleTab::Session(first)));
+                assert!(tabs.contains(&TitleTab::Session(second)));
+                shell.open_title_tab(&TitleTab::Session(first), window, cx);
+                assert_eq!(shell.workspace.active, Some(first));
+                assert_eq!(shell.visible_tabs(cx), tabs);
+                shell.open_title_tab(&TitleTab::Session(second), window, cx);
+                assert_eq!(shell.visible_tabs(cx), tabs);
+                shell.close(second, window, cx);
+                assert_eq!(shell.workspace.active, Some(first));
+                assert_eq!(shell.visible_tabs(cx), [TitleTab::Session(first)]);
+                shell.workspace.classic_layout = true;
+                shell.workspace.project = "/work/monocode".into();
+                assert!(!shell.visible_tabs(cx).contains(&TitleTab::Session(first)));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn focused_tab_marks_use_the_session_project(cx: &mut TestAppContext) {
+        let (window, first, second) = window(cx);
+        window.update(cx, |shell, _, cx| {
+            for session in [first, second] {
+                let project = shell.session_metadata(session, cx).summary.cwd.clone();
+                let copy = shell.tab_copy(session, cx);
+                assert!(matches!(&copy.panes[copy.focus].mark, PaneMark::Project(path) if path == &project));
+            }
+            shell.workspace.classic_layout = true;
+            assert!(matches!(&shell.tab_copy(first, cx).panes[0].mark, PaneMark::Session(_, _)));
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn focused_mono_tabs_reuse_identity_across_projects(cx: &mut TestAppContext) {
+        let (window, other_project, _) = window(cx);
+        let mono = add_mono(window, cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.open(other_project, window, cx);
+                let TitleTab::Mono { id, .. } = &mono else {
+                    panic!("expected Mono");
+                };
+                assert_eq!(shell.mono_tab(id.clone()), mono);
+                shell.workspace.title_order.push(TitleTab::Mono {
+                    id: id.clone(),
+                    project: shell.workspace.project.clone(),
+                    worktree: shell.working_copy().into(),
+                });
+                assert_eq!(
+                    shell
+                        .visible_tabs(cx)
+                        .iter()
+                        .filter(|tab| matches!(tab, TitleTab::Mono { .. }))
+                        .count(),
+                    1
+                );
+                shell.open_title_tab(&mono, window, cx);
+                assert_eq!(shell.active_title_tab(cx), Some(mono.clone()));
+                shell.close_title_tabs(&[mono], None, window, cx);
+                assert!(
+                    !shell
+                        .visible_tabs(cx)
+                        .iter()
+                        .any(|tab| matches!(tab, TitleTab::Mono { .. }))
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn mixed_tabs_open_in_order_and_close_to_the_visible_neighbor(cx: &mut TestAppContext) {
         let (window, other_project, first) = window(cx);
         let mono = add_mono(window, cx);
@@ -482,6 +594,7 @@ mod tests {
                 assert_eq!(
                     shell.visible_tabs(cx),
                     [
+                        TitleTab::Session(other_project),
                         TitleTab::Session(first),
                         mono.clone(),
                         TitleTab::Session(second),
@@ -519,7 +632,7 @@ mod tests {
 
     #[gpui::test]
     fn mono_close_button_and_cmd_w_share_selection_and_focus(cx: &mut TestAppContext) {
-        let (window, _, first) = window(cx);
+        let (window, other_project, first) = window(cx);
         cx.update(|cx| {
             bind_keys(cx);
             input::bind(cx);
@@ -540,7 +653,11 @@ mod tests {
                 assert_eq!(shell.workspace.active, Some(second));
                 assert_eq!(
                     shell.visible_tabs(cx),
-                    [TitleTab::Session(first), TitleTab::Session(second)]
+                    [
+                        TitleTab::Session(other_project),
+                        TitleTab::Session(first),
+                        TitleTab::Session(second)
+                    ]
                 );
                 assert!(
                     shell.sessions[&second]
@@ -575,84 +692,52 @@ mod tests {
     }
 
     #[gpui::test]
-    fn worktree_tabs_cycle_close_and_return_without_touching_other_scopes(cx: &mut TestAppContext) {
+    fn focused_tabs_include_other_projects_and_worktrees(cx: &mut TestAppContext) {
         let (window, other_project, main) = window(cx);
         let mono_main = add_mono(window, cx);
-        let feature = crate::worktree_switcher::WorktreeFocus {
-            path: "/work/feature".into(),
-            branch: Some("feature".into()),
-        };
         window
-            .update(cx, |shell, w, cx| {
-                shell.select_worktree(Some(feature.clone()), w, cx)
+            .update(cx, |shell, window, cx| {
+                shell.select_worktree(
+                    Some(crate::worktree_switcher::WorktreeFocus {
+                        path: "/work/feature".into(),
+                        branch: Some("feature".into()),
+                    }),
+                    window,
+                    cx,
+                );
             })
             .unwrap();
         cx.run_until_parked();
-        let feature_session = window
+        let feature = window
             .update(cx, |shell, _, _| shell.workspace.active.unwrap())
             .unwrap();
         let mono_feature = add_mono(window, cx);
         window
-            .update(cx, |shell, w, cx| {
+            .update(cx, |shell, window, cx| {
                 assert_eq!(
                     shell.visible_tabs(cx),
-                    [TitleTab::Session(feature_session), mono_feature.clone()]
+                    [
+                        TitleTab::Session(other_project),
+                        TitleTab::Session(main),
+                        mono_main.clone(),
+                        TitleTab::Session(feature),
+                        mono_feature.clone()
+                    ]
                 );
-                shell.cycle(1, w, cx);
-                assert_eq!(shell.workspace.active, Some(feature_session));
-                shell.activate_tab(-1, w, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, w, cx| {
-                assert_eq!(shell.active_title_tab(cx), Some(mono_feature.clone()));
-                let TitleTab::Mono { id, .. } = &mono_feature else {
-                    panic!("expected a Mono");
-                };
-                shell.run_menu(MenuTarget::MonoTab(id.clone()), "others", None, w, cx);
-                assert_eq!(
-                    shell.visible_tabs(cx).as_slice(),
-                    std::slice::from_ref(&mono_feature)
-                );
-                assert!(shell.workspace.tabs.contains(&main));
-                assert!(shell.workspace.tabs.contains(&other_project));
-                shell.select_worktree(None, w, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, w, cx| {
+                shell.open_title_tab(&TitleTab::Session(other_project), window, cx);
+                assert_eq!(shell.visible_tabs(cx).len(), 5);
+                shell.open_title_tab(&mono_main, window, cx);
                 assert_eq!(shell.active_title_tab(cx), Some(mono_main.clone()));
-                assert_eq!(
-                    shell.visible_tabs(cx),
-                    [TitleTab::Session(main), mono_main.clone()]
-                );
-                shell.select_worktree(Some(feature), w, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, w, cx| {
-                assert_eq!(shell.active_title_tab(cx), Some(mono_feature));
-                shell.close_title_tabs(&shell.visible_tabs(cx), None, w, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| {
-                assert_eq!(shell.workspace.project, "/work/monocode");
-                assert_eq!(shell.working_copy(), "/work/feature");
-                assert_eq!(shell.visible_tabs(cx).len(), 1);
-                assert!(shell.workspace.title_order.contains(&mono_main));
-                assert!(shell.workspace.tabs.contains(&other_project));
+                shell.run_title_tab_menu(mono_main.clone(), "others", window, cx);
+                assert_eq!(shell.visible_tabs(cx), [mono_main]);
+                assert!(shell.workspace.tabs.is_empty());
             })
             .unwrap();
     }
 
     #[gpui::test]
     fn mixed_reorder_and_restart_preserve_order_and_selected_mono(cx: &mut TestAppContext) {
-        let (window, _, first) = window(cx);
+        let (window, other_project, first) = window(cx);
         let mono = add_mono(window, cx);
         let second = window.update(cx, add_session).unwrap();
         window
@@ -668,6 +753,7 @@ mod tests {
                     shell.visible_tabs(cx),
                     [
                         mono.clone(),
+                        TitleTab::Session(other_project),
                         TitleTab::Session(first),
                         TitleTab::Session(second)
                     ]
@@ -693,6 +779,7 @@ mod tests {
                     shell.visible_tabs(cx),
                     [
                         mono.clone(),
+                        TitleTab::Session(other_project),
                         TitleTab::Session(first),
                         TitleTab::Session(second)
                     ]
@@ -704,7 +791,7 @@ mod tests {
 
     #[gpui::test]
     fn rapid_new_tabs_follow_request_order(cx: &mut TestAppContext) {
-        let (window, _, first) = window(cx);
+        let (window, other_project, first) = window(cx);
         let providers = [Kind::Claude, Kind::Codex, Kind::Claude, Kind::Codex];
         window
             .update(cx, |shell, _, cx| {
@@ -717,9 +804,10 @@ mod tests {
         window
             .update(cx, |shell, _, cx| {
                 let tabs = shell.visible_tabs(cx);
-                assert_eq!(tabs.len(), 5);
-                assert_eq!(tabs[0], TitleTab::Session(first));
-                for (tab, provider) in tabs[1..].iter().zip(providers) {
+                assert_eq!(tabs.len(), 6);
+                assert_eq!(tabs[0], TitleTab::Session(other_project));
+                assert_eq!(tabs[1], TitleTab::Session(first));
+                for (tab, provider) in tabs[2..].iter().zip(providers) {
                     assert_eq!(
                         shell.sessions[&tab.session().unwrap()]
                             .read(cx)
@@ -905,7 +993,7 @@ mod interaction_tests {
     fn dragging_a_mono_uses_the_mixed_strip_slots_and_keeps_the_active_session(
         cx: &mut TestAppContext,
     ) {
-        let (window, _, first) = window(cx);
+        let (window, other_project, first) = window(cx);
         window
             .update(cx, |shell, w, cx| {
                 shell
@@ -951,7 +1039,14 @@ mod interaction_tests {
         visual.run_until_parked();
         window
             .update(visual, |shell, _, cx| {
-                assert_eq!(shell.visible_tabs(cx), [mono, TitleTab::Session(first)]);
+                assert_eq!(
+                    shell.visible_tabs(cx),
+                    [
+                        TitleTab::Session(other_project),
+                        mono,
+                        TitleTab::Session(first)
+                    ]
+                );
                 assert_eq!(shell.workspace.active, Some(first));
                 assert!(!shell.mono_active(cx));
             })

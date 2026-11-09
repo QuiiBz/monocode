@@ -37,7 +37,7 @@ mod session_filters;
 mod session_folders;
 mod session_groups;
 mod session_loading;
-mod session_preview;
+pub(crate) mod session_preview;
 mod session_shortcuts;
 mod settings;
 mod shortcuts;
@@ -556,6 +556,7 @@ struct TabPane {
     mark: PaneMark,
 }
 enum PaneMark {
+    Project(String),
     /// The provider, with the session id when its mark is lit.
     Session(String, Option<i64>),
     /// A file's name, or `None` for changes and commits.
@@ -3071,10 +3072,11 @@ impl Shell {
     }
     fn spawn_terminal(&mut self, cwd: String, cx: &mut Context<Self>) -> Entity<Terminal> {
         let terminal = cx.new(|cx| Terminal::new(cwd, cx));
-        self.observations.push(cx.subscribe(
-            &terminal,
-            |shell, terminal, _: &TerminalEvent, cx| shell.terminal_changed(terminal, cx),
-        ));
+        self.observations.push(
+            cx.subscribe(&terminal, |shell, terminal, _: &TerminalEvent, cx| {
+                shell.terminal_changed(terminal, cx)
+            }),
+        );
         terminal
     }
     /// A restored dock reopens its tabs as fresh shells once it is shown.
@@ -4455,24 +4457,53 @@ impl Shell {
         }
     }
 
+    fn reusable_project_tab(&self, id: i64, cx: &App) -> bool {
+        !self.workspace.classic_layout
+            && self.workspace.active == Some(id)
+            && self.active_title_tab(cx) == Some(TitleTab::Session(id))
+            && self.workspace.layout(id).leaf_ids() == [id]
+            && !self.workspace.pinned_tabs.contains(&TitleTab::Session(id))
+            && !self.workspace.reviews.contains_key(&id)
+            && self.session_summaries.contains_key(&id)
+            && {
+                let session = self.session_metadata(id, cx);
+                !session.summary.has_messages
+                    && !session.summary.archived
+                    && !session.busy
+                    && !session.has_saved_draft()
+                    && self
+                        .sessions
+                        .get(&id)
+                        .is_none_or(|session| session.read(cx).empty_composer(cx))
+            }
+    }
+
     pub(super) fn select_project(
         &mut self,
         path: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let replacement = self.workspace.active.filter(|id| {
+            self.reusable_project_tab(*id, cx) && self.session_metadata(*id, cx).summary.cwd != path
+        });
+        let keep_tab = !self.workspace.classic_layout
+            && replacement.is_none()
+            && self.active_title_tab(cx).is_some();
         self.selected_sessions.clear();
         self.selection_anchor = None;
         self.sidebar_target = None;
         self.navigation_revision += 1;
-        self.leave_app_views(cx);
-        self.leave_app_search(cx);
         self.close_preview(cx);
-        if let Some(monos) = self.monos.clone() {
-            monos.update(cx, |m, cx| m.close(cx));
+        if !keep_tab {
+            self.leave_app_views(cx);
+            self.leave_app_search(cx);
+            if let Some(monos) = self.monos.clone() {
+                monos.update(cx, |m, cx| m.close(cx));
+            }
+            self.workspace.active = None;
         }
         self.workspace.project = path.clone();
-        self.workspace.active = None;
         if let Some(ix) = self.workspace.projects.iter().position(|p| p == &path) {
             if ix < self.spaces_start {
                 self.spaces_start = ix;
@@ -4481,6 +4512,27 @@ impl Shell {
             }
         }
         self.workspace.collapsed.remove(&path);
+        if keep_tab {
+            self.focus_workspace(window, cx);
+            self.persist(cx);
+            cx.notify();
+            return;
+        }
+        if let Some(id) = replacement {
+            self.workspace.active = Some(id);
+            if let Some(target) = self.available_project_blank(cx) {
+                self.workspace.swap_session(id, target);
+                self.replace_title_tab_key(id, target);
+                self.activate_session(target, window, cx);
+                self.persist(cx);
+                cx.notify();
+                return;
+            }
+            self.create_session_target(self.default_choice(), true, None, Some(id), cx);
+            self.invalidate_chrome(cx);
+            cx.notify();
+            return;
+        }
         // Original-layout project buttons leave the standalone Mono/app view.
         // The new layout restores each project's selected tab, including Monos.
         let remembered_session = self
@@ -4542,11 +4594,8 @@ impl Shell {
         self.persist(cx);
         cx.notify();
     }
-    fn ensure_project_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workspace.active.is_some() || self.mono_active(cx) {
-            return;
-        }
-        if let Some(id) = self.order.iter().copied().find(|id| {
+    fn available_project_blank(&self, cx: &App) -> Option<i64> {
+        self.order.iter().copied().find(|id| {
             let s = self.session_metadata(*id, cx);
             s.summary.cwd == self.workspace.project
                 && monocode_core::files::path_key(self.session_working_copy(*id, cx))
@@ -4558,14 +4607,20 @@ impl Shell {
                 && self
                     .sessions
                     .get(id)
-                    .is_none_or(|v| v.read(cx).input.read(cx).content.is_empty())
+                    .is_none_or(|view| view.read(cx).empty_composer(cx))
                 && self.workspace.tab_of(*id).is_none()
                 && self
                     .workspace
                     .reviews
                     .get(id)
                     .is_none_or(|r| r.tabs.is_empty())
-        }) {
+        })
+    }
+    fn ensure_project_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.active.is_some() || self.mono_active(cx) {
+            return;
+        }
+        if let Some(id) = self.available_project_blank(cx) {
             self.activate_session(id, window, cx);
         } else {
             self.create_session(self.default_choice(), true, cx);
@@ -4610,16 +4665,17 @@ impl Shell {
         only_if_empty: bool,
         cx: &mut Context<Self>,
     ) {
-        self.create_session_target(choice, only_if_empty, None, cx);
+        self.create_session_target(choice, only_if_empty, None, None, cx);
     }
     fn create_in_folder(&mut self, folder: String, cx: &mut Context<Self>) {
-        self.create_session_target(self.default_choice(), false, Some(folder), cx);
+        self.create_session_target(self.default_choice(), false, Some(folder), None, cx);
     }
     fn create_session_target(
         &mut self,
         choice: new_chat_choice::NewChatChoice,
         only_if_empty: bool,
         folder: Option<String>,
+        replacement: Option<i64>,
         cx: &mut Context<Self>,
     ) {
         let store = self.store.clone();
@@ -4673,7 +4729,10 @@ impl Shell {
                             || this.worktree_focus.get(&cwd).map(|f| &f.path)
                                 != focus.as_ref().map(|f| &f.path)
                             || if only_if_empty {
-                                this.workspace.active.is_some()
+                                (this.workspace.active.is_some()
+                                    && this.workspace.active != replacement)
+                                    || replacement
+                                        .is_some_and(|id| !this.reusable_project_tab(id, cx))
                                     || this.mono_active(cx)
                                     || this.app_view_open()
                                     || this.settings.is_some()
@@ -4684,6 +4743,10 @@ impl Shell {
                             this.invalidate_chrome(cx);
                             cx.notify();
                             return;
+                        }
+                        if let Some(previous) = replacement {
+                            this.workspace.swap_session(previous, id);
+                            this.replace_title_tab_key(previous, id);
                         }
                         this.order.retain(|s| *s != id);
                         this.order.insert(0, id);
@@ -6210,17 +6273,21 @@ impl Shell {
         };
         let pinned = session.summary.pinned;
         let mark = {
-            let mark = match self.session_marks.get(&id) {
-                Some(mark) if self.sidebar_uncached() => div()
-                    .size(px(side))
-                    .flex_shrink_0()
-                    .child(mark.clone())
-                    .into_any_element(),
-                Some(mark) => mark
-                    .clone()
-                    .cached(StyleRefinement::default().size(px(side)).flex_shrink_0())
-                    .into_any_element(),
-                None => provider_icon(&session.summary.provider, side).into_any_element(),
+            let mark = if !self.workspace.classic_layout {
+                self.focused_project_mark(&session.summary.cwd, side)
+            } else {
+                match self.session_marks.get(&id) {
+                    Some(mark) if self.sidebar_uncached() => div()
+                        .size(px(side))
+                        .flex_shrink_0()
+                        .child(mark.clone())
+                        .into_any_element(),
+                    Some(mark) => mark
+                        .clone()
+                        .cached(StyleRefinement::default().size(px(side)).flex_shrink_0())
+                        .into_any_element(),
+                    None => provider_icon(&session.summary.provider, side).into_any_element(),
+                }
             };
             div()
                 .relative()
@@ -6614,10 +6681,10 @@ impl Shell {
                 .monos
                 .as_ref()
                 .is_some_and(|m| m.read(cx).hidden_session(id))
-                && s.summary.cwd == self.workspace.project
+                && (!self.workspace.classic_layout || s.summary.cwd == self.workspace.project)
                 && s.summary.has_messages
                 && !self.orchestration_worker(id)
-                && self.in_sidebar_worktree_scope(id, cx)
+                && (!self.workspace.classic_layout || self.in_sidebar_worktree_scope(id, cx))
         };
         let shown: HashSet<_> = self
             .order
@@ -6956,11 +7023,18 @@ impl Shell {
                                             self.session_metadata(preview.id, cx).summary,
                                             preview.data.as_ref(),
                                             self.unseen_finished.contains(&preview.id),
+                                            &self.project_label(
+                                                &self.session_metadata(preview.id, cx).summary.cwd,
+                                            ),
                                         )
                                     },
                                     |view| {
-                                        view.read(cx)
-                                            .preview(self.unseen_finished.contains(&preview.id))
+                                        view.read(cx).preview(
+                                            self.unseen_finished.contains(&preview.id),
+                                            &self.project_label(
+                                                &self.session_metadata(preview.id, cx).summary.cwd,
+                                            ),
+                                        )
                                     },
                                 )),
                         ),
@@ -7116,7 +7190,8 @@ impl Shell {
                             })
                             .on_mouse_down(MouseButton::Left, {
                                 let path = path.clone();
-                                cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
                                     this.start_space_drag(&path, event);
                                 })
                             })
@@ -7269,7 +7344,11 @@ impl Shell {
                     } else {
                         title
                     },
-                    mark: PaneMark::Session(session.summary.provider.clone(), lit.then_some(id)),
+                    mark: if self.workspace.classic_layout {
+                        PaneMark::Session(session.summary.provider.clone(), lit.then_some(id))
+                    } else {
+                        PaneMark::Project(session.summary.cwd.clone())
+                    },
                 });
             }
             if let Some(r) = review(&id)
@@ -7297,6 +7376,7 @@ impl Shell {
     fn pane_mark(&self, mark: &PaneMark, active: bool) -> AnyElement {
         let ink = content(if active { 1. } else { 0.5 });
         let mark = match mark {
+            PaneMark::Project(project) => self.focused_project_mark(project, 14.),
             PaneMark::Session(provider, lit) => match lit.and_then(|id| self.tab_marks.get(&id)) {
                 Some(mark) => mark
                     .clone()
@@ -9521,6 +9601,11 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(130));
         cx.run_until_parked();
         cx.refresh().unwrap();
+        assert!(
+            gpui::VisualTestContext::from_window(window.into(), cx)
+                .debug_bounds("session-preview-project")
+                .is_some()
+        );
         let (first, surface) = window
             .update(cx, |shell, _, _| {
                 let preview = shell
@@ -9606,8 +9691,8 @@ mod tests {
                 shell.open(a, w, cx);
                 assert_eq!(shell.usage_footer.read(cx).kind(), Kind::Codex);
                 shell.close(a, w, cx);
-                assert_eq!(shell.workspace.project, "/work/another-project");
-                assert_eq!(shell.workspace.active, None);
+                assert_eq!(shell.workspace.project, "/work/monocode");
+                assert_eq!(shell.workspace.active, Some(b));
                 shell.open(b, w, cx);
                 assert_eq!(shell.usage_footer.read(cx).kind(), Kind::Claude);
                 shell.sessions[&b].update(cx, |conversation, cx| {
@@ -9653,6 +9738,7 @@ mod tests {
         let (window, a, b) = window(cx);
         window
             .update(cx, |shell, w, cx| {
+                shell.workspace.classic_layout = true;
                 shell.open(a, w, cx);
                 shell.run_menu(MenuTarget::Tab(a), "all", None, w, cx);
             })
@@ -9685,6 +9771,7 @@ mod tests {
         for split in [false, true] {
             window
                 .update(cx, |shell, w, cx| {
+                    shell.sessions[&b].update(cx, |session, _| session.summary.has_messages = true);
                     shell.open(b, w, cx);
                     if split {
                         shell.split_session(SplitDir::Right, cx);
@@ -9698,7 +9785,7 @@ mod tests {
             window
                 .update(cx, |shell, _, _| {
                     assert_eq!(shell.workspace.project, "/work/another-project");
-                    assert_eq!(shell.workspace.active, Some(a));
+                    assert_eq!(shell.workspace.active, Some(b));
                     assert_eq!(shell.workspace.tabs, [a, b]);
                     assert!(shell.workspace.layouts.is_empty());
                 })
@@ -9772,7 +9859,10 @@ mod tests {
         let (window, a, _) = window(cx);
         cx.update(bind_keys);
         window
-            .update(cx, |shell, w, cx| shell.open(a, w, cx))
+            .update(cx, |shell, w, cx| {
+                shell.workspace.classic_layout = true;
+                shell.open(a, w, cx);
+            })
             .unwrap();
         let modifier = if cfg!(target_os = "macos") {
             "cmd"
@@ -9823,6 +9913,7 @@ mod tests {
         let (window, a, b) = window(cx);
         window
             .update(cx, |shell, w, cx| {
+                shell.workspace.classic_layout = true;
                 shell.sessions[&b].update(cx, |s, cx| {
                     s.busy = true;
                     s.input.update(cx, |i, cx| {
@@ -9855,6 +9946,7 @@ mod tests {
         let (window, a, b) = window(cx);
         window
             .update(cx, |shell, w, cx| {
+                shell.workspace.classic_layout = true;
                 shell.sessions[&b].update(cx, |s, _| s.summary.has_messages = true);
                 shell.close(b, w, cx);
             })
@@ -9875,6 +9967,7 @@ mod tests {
         let (window, a, b) = window(cx);
         window
             .update(cx, |shell, w, cx| {
+                shell.workspace.classic_layout = true;
                 let mut extra = Vec::new();
                 for _ in 0..2 {
                     let summary = locked(&shell.store)
@@ -9905,10 +9998,11 @@ mod tests {
             .unwrap();
     }
     #[gpui::test]
-    fn tab_lifecycle_project_switches_remember_the_last_focused_tab(cx: &mut TestAppContext) {
-        let (window, a, b) = window(cx);
+    fn tab_lifecycle_project_switches_keep_the_current_tab(cx: &mut TestAppContext) {
+        let (window, _, b) = window(cx);
         window
             .update(cx, |shell, w, cx| {
+                shell.sessions[&b].update(cx, |session, _| session.summary.has_messages = true);
                 let summary = locked(&shell.store)
                     .unwrap()
                     .create("codex", "/work/monocode")
@@ -9918,7 +10012,7 @@ mod tests {
                 shell.open(c, w, cx);
                 shell.open(b, w, cx);
                 shell.select_project("/work/another-project".into(), w, cx);
-                assert_eq!(shell.workspace.active, Some(a));
+                assert_eq!(shell.workspace.active, Some(b));
                 shell.select_project("/work/monocode".into(), w, cx);
                 assert_eq!(shell.workspace.active, Some(b));
                 let saved = serde_json::to_string(&shell.workspace).unwrap();
@@ -9929,7 +10023,7 @@ mod tests {
                     .collect();
                 let restored = Workspace::restore(Some(&saved), &summaries, "/work/monocode");
                 assert_eq!(restored.project_focus["/work/monocode"], b);
-                assert_eq!(restored.project_focus["/work/another-project"], a);
+                assert!(!restored.project_focus.contains_key("/work/another-project"));
                 assert_eq!(restored.active, Some(b));
             })
             .unwrap();
@@ -9939,6 +10033,7 @@ mod tests {
         let (window, a, b) = window(cx);
         window
             .update(cx, |shell, w, cx| {
+                shell.workspace.classic_layout = true;
                 shell.open_review(
                     crate::review::ReviewTab::Commit {
                         cwd: "/work/monocode".into(),
@@ -9970,6 +10065,139 @@ mod tests {
             })
             .unwrap();
     }
+    #[gpui::test]
+    fn empty_project_tab_switches_project_in_the_same_slot(cx: &mut TestAppContext) {
+        let (window, history, empty) = window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(shell.reusable_project_tab(empty, cx));
+                shell.select_project("/work/another-project".into(), window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                let replacement = shell.workspace.active.unwrap();
+                assert_ne!(replacement, empty);
+                assert_ne!(replacement, history);
+                assert_eq!(shell.workspace.tabs, [history, replacement]);
+                assert_eq!(
+                    shell.session_metadata(replacement, cx).summary.cwd,
+                    "/work/another-project"
+                );
+                assert_eq!(
+                    locked(&shell.store)
+                        .unwrap()
+                        .sessions()
+                        .unwrap()
+                        .into_iter()
+                        .find(|session| session.id == replacement)
+                        .unwrap()
+                        .cwd,
+                    "/work/another-project"
+                );
+                shell.select_project("/work/monocode".into(), window, cx);
+                assert_eq!(shell.workspace.tabs, [history, empty]);
+                assert_eq!(shell.workspace.active, Some(empty));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn empty_project_tab_sidebar_icon_reuses_the_tab(cx: &mut TestAppContext) {
+        let (window, history, empty) = window(cx);
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let project = visual.debug_bounds("project-space-0").unwrap();
+        visual.simulate_click(project.center(), Default::default());
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, _, cx| {
+                let replacement = shell.workspace.active.unwrap();
+                assert_ne!(replacement, empty);
+                assert_ne!(replacement, history);
+                assert_eq!(shell.workspace.tabs, [history, replacement]);
+                assert_eq!(
+                    shell.session_metadata(replacement, cx).summary.cwd,
+                    "/work/another-project"
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn empty_project_tab_rapid_switches_only_replace_the_original_slot(cx: &mut TestAppContext) {
+        let (window, history, empty) = window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                for project in [
+                    "/work/empty-a",
+                    "/work/empty-b",
+                    "/work/empty-c",
+                    "/work/empty-c",
+                ] {
+                    shell.select_project(project.into(), window, cx);
+                }
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                let replacement = shell.workspace.active.unwrap();
+                assert_ne!(replacement, empty);
+                assert_eq!(shell.workspace.tabs, [history, replacement]);
+                assert_eq!(
+                    shell.session_metadata(replacement, cx).summary.cwd,
+                    "/work/empty-c"
+                );
+                assert_eq!(
+                    shell
+                        .session_summaries
+                        .values()
+                        .filter(|session| session.cwd == "/work/empty-c")
+                        .count(),
+                    1
+                );
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn empty_project_tab_preserves_drafts_busy_tabs_and_classic_layout(cx: &mut TestAppContext) {
+        for state in ["draft", "busy", "messages", "pin", "split", "classic"] {
+            let (window, history, empty) = window(cx);
+            window
+                .update(cx, |shell, window, cx| {
+                    match state {
+                        "draft" => shell.sessions[&empty].update(cx, |session, cx| {
+                            session
+                                .input
+                                .update(cx, |input, cx| input.set_text("Keep draft".into(), cx))
+                        }),
+                        "busy" => {
+                            shell.sessions[&empty].update(cx, |session, _| session.busy = true)
+                        }
+                        "messages" => shell.sessions[&empty]
+                            .update(cx, |session, _| session.summary.has_messages = true),
+                        "pin" => shell.workspace.pinned_tabs.push(TitleTab::Session(empty)),
+                        "split" => {
+                            shell.workspace.split(history, SplitDir::Right);
+                        }
+                        "classic" => shell.workspace.classic_layout = true,
+                        _ => unreachable!(),
+                    }
+                    assert!(!shell.reusable_project_tab(empty, cx), "{state}");
+                    shell.select_project("/work/another-project".into(), window, cx);
+                    assert!(shell.workspace.tab_of(empty).is_some(), "{state}");
+                    assert_eq!(
+                        shell.session_metadata(empty, cx).summary.cwd,
+                        "/work/monocode"
+                    );
+                })
+                .unwrap();
+        }
+    }
+
     #[gpui::test]
     fn projects_without_tabs_land_on_one_reusable_blank_session(cx: &mut TestAppContext) {
         let (window, _, b) = window(cx);
@@ -10032,6 +10260,37 @@ mod tests {
             .update(cx, |shell, _, _| {
                 assert!(shell.menu.is_none());
                 assert_ne!(shell.workspace.project, before);
+                assert_eq!(shell.workspace.tabs.len(), 2);
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn project_picker_keeps_the_current_conversation_tab(cx: &mut TestAppContext) {
+        let (window, _, active) = window(cx);
+        cx.update(|cx| {
+            input::bind(cx);
+            crate::popover::bind(cx);
+        });
+        let before = window
+            .update(cx, |shell, w, cx| {
+                shell.sessions[&active]
+                    .update(cx, |session, _| session.summary.has_messages = true);
+                let anchor = Anchor::Slot(shell.project_anchor.clone());
+                shell.open_menu(MenuTarget::Header, anchor, w, cx);
+                shell.workspace.project.clone()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // Switch worktree is first; skip the separator to Switch project, open
+        // its picker (which focuses the search field), and take the next project.
+        cx.simulate_keystrokes(window.into(), "down right down enter");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(shell.menu.is_none());
+                assert_ne!(shell.workspace.project, before);
+                assert_eq!(shell.workspace.tabs.len(), 2);
+                assert_eq!(shell.workspace.active, Some(active));
             })
             .unwrap();
     }
@@ -12038,6 +12297,19 @@ mod tests {
             })
             .unwrap();
     }
+    pub(super) fn isolated_window(cx: &mut TestAppContext) -> (WindowHandle<Shell>, i64, i64) {
+        let (window, other_project, session) = window(cx);
+        window
+            .update(cx, |shell, _, _| {
+                shell.workspace.close(other_project);
+                shell
+                    .workspace
+                    .title_order
+                    .retain(|tab| tab != &TitleTab::Session(other_project));
+            })
+            .unwrap();
+        (window, other_project, session)
+    }
     pub(super) fn window(cx: &mut TestAppContext) -> (WindowHandle<Shell>, i64, i64) {
         let mut store = Store::open(std::path::Path::new(":memory:")).unwrap();
         let mut a = store.create("codex", "/work/another-project").unwrap();
@@ -13260,8 +13532,8 @@ mod tests {
                     });
                 });
                 shell.close(b, w, cx);
-                assert_eq!(shell.workspace.active, None);
-                assert_eq!(shell.workspace.project, "/work/monocode");
+                assert_eq!(shell.workspace.active, Some(a));
+                assert_eq!(shell.workspace.project, "/work/another-project");
                 assert!(shell.sessions[&b].read(cx).busy);
                 shell.open(a, w, cx);
                 shell.open(b, w, cx);

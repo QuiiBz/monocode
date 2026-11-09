@@ -1215,22 +1215,25 @@ impl Monos {
         .detach();
     }
     pub(crate) fn rail(&mut self, project: Option<String>, cx: &mut Context<Self>) -> AnyElement {
-        self.rail_impl(project, false, false, cx)
+        self.rail_impl(project.clone(), false, false, project, cx)
     }
-    /// Original navigation lists every Mono, before the projects; the inset
-    /// layout continues to list only the current project's Monos.
+    pub(crate) fn focused_rail(&mut self, project: String, cx: &mut Context<Self>) -> AnyElement {
+        self.rail_impl(None, false, false, Some(project), cx)
+    }
+    /// Original navigation lists every Mono before the projects.
     pub(crate) fn project_navigation_rail(
         &mut self,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.rail_impl(None, true, compact, cx)
+        self.rail_impl(None, true, compact, None, cx)
     }
     fn rail_impl(
         &mut self,
         project: Option<String>,
         original: bool,
         compact: bool,
+        add_project: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if !self.prefs.monos {
@@ -1252,7 +1255,6 @@ impl Monos {
         if original && !has && compact {
             return div().into_any_element();
         }
-        let add_project = project.clone();
         let heading = if original {
             div()
                 .h(px(30.))

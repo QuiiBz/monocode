@@ -235,6 +235,8 @@ mod tests {
         window
             .update(cx, |shell, _, cx| {
                 let entities = shell.sessions.len();
+                assert_eq!(shell.sidebar_session_ids(cx).len(), 8);
+                shell.workspace.classic_layout = true;
                 assert_eq!(shell.sidebar_session_ids(cx).len(), 7);
                 shell.worktree_focus.insert(
                     "/work/project".into(),
@@ -341,7 +343,7 @@ mod tests {
                 assert_eq!(shell.sessions.len(), 1);
                 assert_eq!(shell.session_marks.len(), 1);
                 assert_eq!(shell.tab_marks.len(), 1);
-                assert_eq!(shell.sidebar_session_ids(cx).len(), 1000);
+                assert_eq!(shell.sidebar_session_ids(cx).len(), 1200);
                 assert_eq!(shell.visible_tabs(cx).len(), 2);
                 assert_eq!(
                     shell.tab_copy(oldest, cx).headline,

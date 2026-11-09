@@ -448,7 +448,7 @@ mod tests {
 
     #[gpui::test]
     fn pinned_tabs_lead_the_order_leave_the_strip_and_survive_bulk_closes(cx: &mut TestAppContext) {
-        let (window, _, first) = window(cx);
+        let (window, _, first) = crate::shell::tests::isolated_window(cx);
         let (second, third) = window
             .update(cx, |shell, w, cx| {
                 (add_session(shell, w, cx), add_session(shell, w, cx))
