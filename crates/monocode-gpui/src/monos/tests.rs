@@ -2929,3 +2929,28 @@ fn topic_memory_refreshes_from_api_and_saves_without_changing_default(cx: &mut T
         assert!(manager.files.as_ref().unwrap().memory.is_empty());
     });
 }
+
+#[gpui::test]
+fn focused_rail_includes_other_projects_and_unassigned_monos(cx: &mut TestAppContext) {
+    let setup = setup(cx);
+    setup.manager.update(cx, |manager, cx| {
+        for (id, projects) in [
+            ("other-project", vec!["/other".into()]),
+            ("unassigned", vec![]),
+        ] {
+            manager.roster.monos.push(Mono {
+                id: id.into(),
+                name: id.into(),
+                projects,
+                ..Default::default()
+            });
+        }
+        let _ = manager.focused_rail(setup.project.clone(), cx);
+        assert!(manager.rail_ids.contains(&setup.id));
+        assert!(manager.rail_ids.contains(&"other-project".to_owned()));
+        assert!(manager.rail_ids.contains(&"unassigned".to_owned()));
+        let _ = manager.rail(Some(setup.project.clone()), cx);
+        assert!(!manager.rail_ids.contains(&"other-project".to_owned()));
+        assert!(!manager.rail_ids.contains(&"unassigned".to_owned()));
+    });
+}

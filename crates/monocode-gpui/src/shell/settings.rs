@@ -622,6 +622,9 @@ mod tests {
         visual.run_until_parked();
         assert!(visual.debug_bounds("settings-header").is_some());
         visual.dispatch_action(NextTab);
+        if !classic {
+            visual.dispatch_action(NextTab);
+        }
         visual.run_until_parked();
         window
             .update(visual, |shell, window, cx| {
@@ -638,6 +641,9 @@ mod tests {
             })
             .unwrap();
         visual.dispatch_action(PreviousTab);
+        if !classic {
+            visual.dispatch_action(PreviousTab);
+        }
         visual.run_until_parked();
         window
             .update(visual, |shell, window, cx| {

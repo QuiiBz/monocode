@@ -269,8 +269,16 @@ impl Shell {
     fn sidebar_scope(&self) -> String {
         format!(
             "{}\0{}\0{}\0{:?}\0{}\0{}\0{}",
-            self.workspace.project,
-            self.working_copy(),
+            if self.workspace.classic_layout {
+                self.workspace.project.as_str()
+            } else {
+                ""
+            },
+            if self.workspace.classic_layout {
+                self.working_copy()
+            } else {
+                ""
+            },
             self.query,
             self.workspace.session_filters,
             self.workspace.preferences.show_archived,
@@ -486,7 +494,11 @@ impl Shell {
                     .clone()
                     .map(|monos| {
                         monos.update(cx, |monos, cx| {
-                            monos.rail(Some(self.workspace.project.clone()), cx)
+                            if self.workspace.classic_layout {
+                                monos.rail(Some(self.workspace.project.clone()), cx)
+                            } else {
+                                monos.focused_rail(self.workspace.project.clone(), cx)
+                            }
                         })
                     })
                     .unwrap_or_else(|| div().into_any());
@@ -907,6 +919,106 @@ mod tests {
     use super::age_label;
     use chrono::TimeZone;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn focused_sessions_keep_all_projects_after_selection(cx: &mut TestAppContext) {
+        let (window, first, second) = super::super::tests::window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.workspace.classic_layout = false;
+                shell
+                    .session_summaries
+                    .get_mut(&second)
+                    .unwrap()
+                    .has_messages = true;
+                shell.sessions[&second]
+                    .update(cx, |session, _| session.summary.has_messages = true);
+                let before = shell.sidebar_session_ids(cx);
+                assert!(before.contains(&first));
+                assert!(before.contains(&second));
+                let project = shell.session_metadata(first, cx).summary.cwd.clone();
+                shell.workspace.project_appearance.insert(
+                    project.clone(),
+                    monocode_core::project_appearance::ProjectAppearance {
+                        name: "First project".into(),
+                        color: Some(0x123456),
+                        mascot: Some("cat".into()),
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(shell.project_label(&project), "First project");
+                assert_eq!(shell.appearance(&project).color(&project), 0x123456);
+                assert_eq!(shell.appearance(&project).mascot(&project), 3);
+                assert_eq!(shell.project_label(""), "Unknown project");
+                assert_eq!(shell.project_label("/deleted/project"), "project");
+                let scope = shell.sidebar_scope();
+                shell.open(first, window, cx);
+                assert_eq!(shell.workspace.active, Some(first));
+                assert_eq!(shell.sidebar_scope(), scope);
+                assert_eq!(shell.sidebar_session_ids(cx), before);
+                shell.open(second, window, cx);
+                assert_eq!(shell.workspace.active, Some(second));
+                assert_eq!(shell.sidebar_session_ids(cx), before);
+                shell.query = "no matching session".into();
+                assert!(shell.sidebar_session_ids(cx).is_empty());
+                shell.query.clear();
+                shell.workspace.classic_layout = true;
+                assert!(shell.sidebar_session_ids(cx).iter().all(|id| {
+                    shell.session_metadata(*id, cx).summary.cwd == shell.workspace.project
+                }));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn focused_folders_keep_their_project_owner(cx: &mut TestAppContext) {
+        let (window, first, second) = super::super::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.classic_layout = false;
+                let first_project = shell.session_metadata(first, cx).summary.cwd.clone();
+                let second_project = shell.session_metadata(second, cx).summary.cwd.clone();
+                for (project, session, folder_id) in [
+                    (&first_project, first, "first-folder"),
+                    (&second_project, second, "second-folder"),
+                ] {
+                    shell
+                        .groups
+                        .entry(project.clone())
+                        .or_default()
+                        .folders
+                        .push(monocode_core::session_groups::Folder {
+                            id: folder_id.into(),
+                            name: folder_id.into(),
+                            session_ids: vec![session],
+                            ..Default::default()
+                        });
+                }
+                assert!(shell.project_groups().folder("first-folder").is_some());
+                assert!(shell.project_groups().folder("second-folder").is_some());
+                shell.workspace.project = second_project.clone();
+                shell.update_groups(cx, |groups| {
+                    groups
+                        .folders
+                        .iter_mut()
+                        .find(|folder| folder.id == "first-folder")
+                        .unwrap()
+                        .collapsed = true;
+                });
+                assert!(
+                    shell.groups[&first_project]
+                        .folder("first-folder")
+                        .unwrap()
+                        .collapsed
+                );
+                assert!(
+                    shell.groups[&second_project]
+                        .folder("first-folder")
+                        .is_none()
+                );
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn focused_navigation_trailing_items_share_the_filter_axis(cx: &mut TestAppContext) {

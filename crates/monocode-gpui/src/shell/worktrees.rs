@@ -414,7 +414,7 @@ mod tests {
                 shell.select_worktree(Some(feature.clone()), w, cx);
                 assert_eq!(shell.workspace.project, project);
                 assert_eq!(shell.workspace.active, Some(feature_session));
-                assert_eq!(shell.sidebar_session_ids(cx), [feature_session]);
+                assert_eq!(shell.sidebar_session_ids(cx).into_iter().collect::<HashSet<_>>(), HashSet::from([main_session, feature_session]));
                 assert_eq!(shell.terminal_cwd(cx), feature.path);
                 shell.select_worktree(None, w, cx);
                 assert_eq!(shell.workspace.active, Some(main_session));

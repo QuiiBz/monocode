@@ -323,6 +323,12 @@ impl Conversation {
     }
     /// SessionCardPreview.tsx's compact model/status header and workspace details.
     /// Its latest message is saved as a draft, not sent (`session.draft`).
+    pub(crate) fn empty_composer(&self, cx: &gpui::App) -> bool {
+        self.input.read(cx).content.is_empty()
+            && !self.input.read(cx).is_composing()
+            && self.attachments.is_empty()
+            && self.pending_attachments.is_empty()
+    }
     pub(crate) fn has_saved_draft(&self) -> bool {
         if self.loaded {
             self.follow_ups.state.draft.is_some()
@@ -347,7 +353,7 @@ impl Conversation {
         self.loaded
             .then(|| (self.model_label(), self.branch.clone()))
     }
-    pub(crate) fn preview(&self, done: bool) -> AnyElement {
+    pub(crate) fn preview(&self, done: bool, project_name: &str) -> AnyElement {
         let kind = Kind::from_id(&self.summary.provider);
         let model = self.resolved_model.as_deref().or(self.model.as_deref());
         let name = self
@@ -374,25 +380,7 @@ impl Conversation {
             .unwrap_or_else(|| cwd.to_owned());
         let linked =
             self.settings.worktree_cwd.is_some() || self.git.as_ref().is_some_and(|git| git.linked);
-        let detail = |label: &'static str, value: String| {
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(72.))
-                        .flex_shrink_0()
-                        .text_color(content(0.45))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(content(0.8))
-                        .child(value),
-                )
-        };
+        let detail = crate::shell::session_preview::detail;
         div()
             .px_3()
             .py_2p5()
@@ -470,7 +458,8 @@ impl Conversation {
                     .child(detail(
                         if linked { "Worktree" } else { "Directory" },
                         directory,
-                    )),
+                    ))
+                    .child(crate::shell::session_preview::project_detail(project_name)),
             )
             .into_any_element()
     }

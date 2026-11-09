@@ -440,7 +440,7 @@ mod tests {
             bind_keys(cx);
             cx.set_reduce_motion(true);
         });
-        let (window, _, session) = window(cx);
+        let (window, _, session) = crate::shell::tests::isolated_window(cx);
         let path = std::env::temp_dir().join(format!(
             "monocode-chat-pane-drag-{}.txt",
             std::process::id()
@@ -647,7 +647,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (window, _, session) = window(cx);
+        let (window, _, session) = crate::shell::tests::isolated_window(cx);
         let path =
             std::env::temp_dir().join(format!("monocode-pane-drag-{}.txt", std::process::id()));
         std::fs::write(&path, "original\n").unwrap();

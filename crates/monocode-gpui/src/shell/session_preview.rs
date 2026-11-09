@@ -11,6 +11,7 @@ pub(super) fn render(
     summary: &Session,
     data: Option<&SessionPreviewData>,
     done: bool,
+    project_name: &str,
 ) -> AnyElement {
     let model = data
         .and_then(|data| data.model.as_deref())
@@ -91,25 +92,41 @@ pub(super) fn render(
                 .text_size(px(11.))
                 .line_height(px(16.))
                 .flex()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(72.))
-                        .flex_shrink_0()
-                        .text_color(content(0.45))
-                        .child(if worktree.is_some() {
-                            "Worktree"
-                        } else {
-                            "Directory"
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(content(0.8))
-                        .child(directory),
-                ),
+                .flex_col()
+                .gap_1p5()
+                .child(detail(
+                    if worktree.is_some() {
+                        "Worktree"
+                    } else {
+                        "Directory"
+                    },
+                    directory,
+                ))
+                .child(project_detail(project_name)),
         )
         .into_any_element()
+}
+
+pub(crate) fn detail(label: &'static str, value: String) -> gpui::Div {
+    div()
+        .flex()
+        .gap_2()
+        .child(
+            div()
+                .w(px(72.))
+                .flex_shrink_0()
+                .text_color(content(0.45))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(content(0.8))
+                .child(value),
+        )
+}
+
+pub(crate) fn project_detail(project_name: &str) -> impl IntoElement {
+    detail("Project", project_name.to_owned()).debug_selector(|| "session-preview-project".into())
 }

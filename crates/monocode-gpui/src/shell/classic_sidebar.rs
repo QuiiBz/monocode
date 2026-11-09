@@ -952,9 +952,15 @@ impl Shell {
                                     self.session_metadata(id, cx).summary,
                                     preview.data.as_ref(),
                                     self.unseen_finished.contains(&id),
+                                    &self.project_label(&self.session_metadata(id, cx).summary.cwd),
                                 )
                             },
-                            |view| view.read(cx).preview(self.unseen_finished.contains(&id)),
+                            |view| {
+                                view.read(cx).preview(
+                                    self.unseen_finished.contains(&id),
+                                    &self.project_label(&self.session_metadata(id, cx).summary.cwd),
+                                )
+                            },
                         )),
                 )
                 .into_any_element(),
