@@ -51,6 +51,7 @@ use terminal_panes::terminal_drag_ghost;
 mod title_tabs;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod window_chrome;
+mod work_item_badge;
 mod worktrees;
 
 use crate::{
@@ -692,6 +693,7 @@ pub(crate) struct Shell {
     reminders: Vec<monocode_core::store::Reminder>,
     renaming: Option<session_groups::Renaming>,
     link_dialog: Option<session_groups::LinkDialog>,
+    work_item_badges: std::cell::RefCell<HashMap<(i64, bool), Entity<work_item_badge::Badge>>>,
     action_dialog: Option<actions::ActionDialog>,
     actions_anchor: AnchorSlot,
     new_tab_anchor: AnchorSlot,
@@ -1083,6 +1085,7 @@ impl Shell {
             reminders: sidebar_metadata.reminders,
             renaming: None,
             link_dialog: None,
+            work_item_badges: Default::default(),
             action_dialog: None,
             actions_anchor: AnchorSlot::default(),
             new_tab_anchor: AnchorSlot::default(),
@@ -6219,8 +6222,7 @@ impl Shell {
             mark.update(cx, |mark, cx| mark.set_size(side, cx));
         }
         let work_item = self.work_item_badge(id, compact, cx);
-        let has_badges = work_item.is_some()
-            || mode.is_some()
+        let has_badges = mode.is_some()
             || self.automation_state.session_automations.contains_key(&id);
         let session = self.session_metadata(id, cx);
         let active = self.selected_sessions.contains(&id)
@@ -6349,12 +6351,10 @@ impl Shell {
             .items_center()
             .gap_1()
             .flex_shrink_0()
-            .children(work_item)
             .when(
                 self.automation_state.session_automations.contains_key(&id),
                 |row| row.child(icon("zap", 12.).text_color(content(0.35))),
             )
-            // Marked on the right like a linked issue or PR, in its mode's colour.
             .when_some(mode, |d, (glyph, color, label)| {
                 d.child(
                     div()
@@ -6377,6 +6377,7 @@ impl Shell {
                 .items_center()
                 .gap(px(if nested { 6. } else { 8. }))
                 .child(mark)
+                .children(work_item)
                 .child(title)
                 .when(has_badges, |d| d.child(badges))
                 .child(suffix)
@@ -6397,6 +6398,7 @@ impl Shell {
                         .when(pinned, |d| {
                             d.child(icon("pin", 12.).text_color(content(0.45)))
                         })
+                        .children(work_item)
                         .child(title)
                         .child(suffix),
                 )

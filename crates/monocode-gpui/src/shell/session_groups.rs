@@ -1130,64 +1130,27 @@ impl Shell {
         )
     }
 
-    /// SessionCard's linked issue or PR, opened on GitHub. Hover underlines
-    /// it as a link; with no number shown, the line runs under the icon.
     pub(super) fn work_item_badge(
         &self,
         id: i64,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let item = self.session_metadata(id, cx).summary.work_item.clone()?;
-        let noun = if item.kind == "pr" { "PR" } else { "issue" };
-        let url = item.url.clone();
-        Some(
-            div()
-                .id(("work-item", id as usize))
-                .role(Role::Link)
-                .aria_label(format!("Open {noun} #{}", item.number))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .px(px(2.))
-                .rounded_sm()
-                .text_size(px(11.))
-                .text_color(rgb(ACCENT))
-                .child(
-                    icon(
-                        if item.kind == "pr" {
-                            "git-pull-request"
-                        } else {
-                            "circle-dot"
-                        },
-                        12.,
-                    )
-                    .text_color(rgb(ACCENT)),
-                )
-                .when(!compact, |d| d.child(format!("#{}", item.number)))
-                .cursor_pointer()
-                .when(compact, |d| {
-                    d.border_b_1()
-                        .border_color(gpui::transparent_black())
-                        .hover(|s| s.border_color(rgb(ACCENT)))
-                })
-                .when(!compact, |d| d.hover(|s| s.underline()))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
-                .on_mouse_up(MouseButton::Middle, {
-                    let url = url.clone();
-                    move |_, _, cx| {
-                        cx.stop_propagation();
-                        cx.open_url(&url);
-                    }
-                })
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    cx.open_url(&url);
-                })
-                .into_any(),
-        )
+        let (item, cwd) = {
+            let metadata = self.session_metadata(id, cx);
+            (
+                metadata.summary.work_item.clone()?,
+                metadata.summary.cwd.clone(),
+            )
+        };
+        let mut badges = self.work_item_badges.borrow_mut();
+        let badge = badges.entry((id, compact)).or_insert_with(|| {
+            cx.new(|_| work_item_badge::Badge::new(id, item.clone(), cwd.clone(), compact))
+        });
+        if badge.read(cx).item != item {
+            *badge = cx.new(|_| work_item_badge::Badge::new(id, item, cwd, compact));
+        }
+        Some(badge.clone().into_any_element())
     }
 
     /// A virtualized group renders its header separately from its member cards.

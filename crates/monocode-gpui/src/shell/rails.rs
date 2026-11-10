@@ -418,6 +418,7 @@ impl Shell {
                     .when(session.summary.pinned, |d| {
                         d.child(icon("pin", 12.).text_color(content(0.45)))
                     })
+                    .children(work_item)
                     .child(title)
                     .when(!header, |d| {
                         d.child(
@@ -468,7 +469,6 @@ impl Shell {
                                         d.child(self.session_archive_button(id, &session, cx))
                                     }),
                             )
-                            .children(work_item)
                             .when(
                                 self.automation_state.session_automations.contains_key(&id),
                                 |d| d.child(icon("zap", 12.).text_color(rgb(0xfbbf24))),

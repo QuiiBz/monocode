@@ -256,6 +256,8 @@ pub struct Check {
 pub struct Checks {
     pub head_oid: String,
     pub checks: Vec<Check>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub review_decision: String,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -979,6 +981,88 @@ pub fn github_work_item(cwd: &Path, repo: &str, kind: &str, number: i64) -> Resu
     item.provider = "github".into();
     Ok(item)
 }
+
+pub struct GithubWorkItemOverview {
+    pub item: Item,
+    pub comments: u64,
+    pub checks: Option<Checks>,
+}
+
+pub fn github_work_item_overview(
+    cwd: &Path,
+    repo: &str,
+    kind: &str,
+    number: i64,
+) -> Result<GithubWorkItemOverview, String> {
+    let path = match kind {
+        "pr" => "pull",
+        "issue" => "issues",
+        _ => return Err("Invalid GitHub item kind".into()),
+    };
+    let parsed = crate::session_groups::parse_github_work_item(&format!(
+        "https://github.com/{repo}/{path}/{number}"
+    ))
+    .filter(|item| item.repo == repo && item.number == number as u64);
+    if number <= 0 || parsed.is_none() {
+        return Err("Invalid GitHub item".into());
+    }
+    let root = gh_root(cwd);
+    let endpoint = format!(
+        "repos/{repo}/{}/{number}",
+        if kind == "pr" { "pulls" } else { "issues" }
+    );
+    let json = run_gh(&root, &["api", &endpoint], false)?;
+    let mut overview = parse_github_work_item_overview(&json, repo, kind, number)?;
+    if kind == "pr" {
+        overview.checks = github::git_github_pr_checks_for(&root, repo, number)
+            .ok()
+            .and_then(|checks| convert(checks).ok());
+    }
+    Ok(overview)
+}
+
+fn parse_github_work_item_overview(
+    json: &str,
+    repo: &str,
+    kind: &str,
+    number: i64,
+) -> Result<GithubWorkItemOverview, String> {
+    #[derive(Deserialize)]
+    struct Overview {
+        title: String,
+        state: String,
+        html_url: String,
+        updated_at: String,
+        comments: u64,
+        #[serde(default)]
+        review_comments: u64,
+        #[serde(default)]
+        merged: bool,
+        #[serde(default)]
+        draft: bool,
+    }
+    let response: Overview = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    Ok(GithubWorkItemOverview {
+        item: Item {
+            provider: "github".into(),
+            kind: kind.into(),
+            number,
+            repo: repo.into(),
+            title: response.title,
+            state: if response.merged {
+                "merged".into()
+            } else {
+                response.state
+            },
+            url: response.html_url,
+            updated_at: response.updated_at,
+            draft: response.draft,
+            ..Default::default()
+        },
+        comments: response.comments.saturating_add(response.review_comments),
+        checks: None,
+    })
+}
 /// githubWorkItemDetails for [`github_work_item`]'s item.
 pub fn github_work_item_details(
     cwd: &Path,
@@ -1049,6 +1133,30 @@ fn run_command(
 #[cfg(test)]
 mod notification_tests {
     use super::*;
+
+    #[test]
+    fn github_overview_counts_discussion_and_review_comments() {
+        let json = serde_json::json!({
+            "title": "Fix linking", "state": "closed", "merged": true,
+            "html_url": "https://github.com/acme/app/pull/12",
+            "updated_at": "2026-11-10T12:00:00Z", "comments": 3, "review_comments": 5
+        });
+        let overview =
+            parse_github_work_item_overview(&json.to_string(), "acme/app", "pr", 12).unwrap();
+        assert_eq!(overview.comments, 8);
+        assert_eq!(overview.item.state, "merged");
+        assert_eq!(overview.item.number, 12);
+        assert!(overview.checks.is_none());
+
+        let mut issue = json;
+        issue.as_object_mut().unwrap().remove("review_comments");
+        issue.as_object_mut().unwrap().remove("merged");
+        let overview =
+            parse_github_work_item_overview(&issue.to_string(), "acme/app", "issue", 12).unwrap();
+        assert_eq!(overview.comments, 3);
+        assert_eq!(overview.item.state, "closed");
+        assert!(parse_github_work_item_overview("{}", "acme/app", "pr", 12).is_err());
+    }
 
     fn item(number: i64, provider: &str) -> Item {
         Item {
