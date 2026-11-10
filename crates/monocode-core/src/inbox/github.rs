@@ -120,6 +120,8 @@ pub struct GitHubPrCheck {
 pub struct GitHubPrChecks {
     pub head_oid: String,
     pub checks: Vec<GitHubPrCheck>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub review_decision: String,
 }
 
 pub(super) fn git_github_repositories_for(root: &Path) -> Result<Vec<String>, String> {
@@ -1104,7 +1106,7 @@ fn github_pr_checks_args(repo: &str, number: i64) -> Result<Vec<String>, String>
         "--repo".into(),
         repo,
         "--json".into(),
-        "headRefOid,statusCheckRollup".into(),
+        "headRefOid,statusCheckRollup,reviewDecision".into(),
     ])
 }
 
@@ -1144,6 +1146,8 @@ fn parse_github_pr_checks(json: &str) -> Result<GitHubPrChecks, String> {
         #[serde(default)]
         head_ref_oid: String,
         #[serde(default)]
+        review_decision: Option<String>,
+        #[serde(default)]
         status_check_rollup: Option<Vec<GitHubStatusCheckRow>>,
     }
     let row: Row = serde_json::from_str(json).map_err(|error| error.to_string())?;
@@ -1153,6 +1157,7 @@ fn parse_github_pr_checks(json: &str) -> Result<GitHubPrChecks, String> {
     }
     Ok(GitHubPrChecks {
         head_oid,
+        review_decision: row.review_decision.unwrap_or_default(),
         checks: row
             .status_check_rollup
             .unwrap_or_default()
@@ -1160,6 +1165,24 @@ fn parse_github_pr_checks(json: &str) -> Result<GitHubPrChecks, String> {
             .map(github_pr_check_from_row)
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod review_status_tests {
+    use super::*;
+
+    #[test]
+    fn check_response_preserves_review_decisions_without_check_runs() {
+        for decision in [Some("APPROVED"), Some("CHANGES_REQUESTED"), None] {
+            let response = serde_json::json!({
+                "headRefOid": "abc123", "statusCheckRollup": null, "reviewDecision": decision,
+            });
+            let parsed = parse_github_pr_checks(&response.to_string()).unwrap();
+            let checks: crate::inbox::Checks = super::super::convert(parsed).unwrap();
+            assert_eq!(checks.review_decision, decision.unwrap_or_default());
+            assert!(checks.checks.is_empty());
+        }
+    }
 }
 
 fn github_pr_check_from_row(row: GitHubStatusCheckRow) -> GitHubPrCheck {
