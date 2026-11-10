@@ -1,6 +1,7 @@
 //! Background session names never join or rewrite the user's provider history.
 use super::*;
 use monocode_core::session_title::{TextModel, display_title};
+use monocode_core::transcript::Row;
 
 impl Conversation {
     /// The background model picked in Settings, else this session's harness.
@@ -121,6 +122,26 @@ impl Conversation {
         })
         .detach();
     }
+    pub(super) fn link_created_pr(&mut self, rows: &[Row], cx: &mut Context<Self>) {
+        if self.summary.work_item.is_some() {
+            return;
+        }
+        let item = rows
+            .iter()
+            .filter(|row| row.role == "tool")
+            .filter_map(|row| serde_json::from_str::<monocode_core::tool::ToolCall>(&row.text).ok())
+            .flat_map(|tool| monocode_core::contributions::found(&tool))
+            .filter(|found| found.kind == monocode_core::contributions::Kind::Opened)
+            .find_map(|found| {
+                let (repo, number) = found.reference.split_once('#')?;
+                monocode_core::session_groups::parse_github_work_item(&format!(
+                    "https://github.com/{repo}/pull/{number}"
+                ))
+            });
+        if let Some(item) = item {
+            self.link_first_work_item(item, cx);
+        }
+    }
     /// Links only an unlinked session: a manual or inbox link always wins.
     fn link_first_work_item(
         &mut self,
@@ -219,6 +240,66 @@ mod tests {
             assert_eq!(v.summary.title, "My session name");
         });
         assert!(locked(&store).unwrap().load(id).unwrap().rows.is_empty());
+    }
+    #[gpui::test]
+    fn created_pr_links_mono_sessions_and_preserves_existing_links(cx: &mut gpui::TestAppContext) {
+        use monocode_core::tool::{ToolCall, ToolState};
+
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(Path::new(":memory:")).unwrap(),
+        ));
+        for tool_name in ["Bash", "mcp__github__create_pull_request"] {
+            let summary = locked(&store).unwrap().create("codex", "/tmp").unwrap();
+            let session_id = summary.id;
+            let view = cx.new(|cx| Conversation::new(summary, store.clone(), cx));
+            let mut tool = ToolCall::new("create-pr", tool_name);
+            tool.input = serde_json::json!({"command":"gh pr create --draft"}).to_string();
+            tool.output = "https://github.com/acme/app/pull/1370".into();
+            let row = |role: &str, tool: &ToolCall| Row {
+                role: role.into(),
+                text: serde_json::to_string(tool).unwrap(),
+                first: true,
+                sent_at: None,
+            };
+            view.update(cx, |conversation, cx| {
+                conversation.settings.mono = Some(monocode_core::agent::MonoContext {
+                    mono: Default::default(),
+                    root: "/tmp".into(),
+                    executable: "/tmp/monocode".into(),
+                });
+                conversation.link_created_pr(&[row("tool", &tool)], cx);
+                assert!(conversation.summary.work_item.is_none());
+                tool.state = ToolState::Failed;
+                conversation.link_created_pr(&[row("tool", &tool)], cx);
+                assert!(conversation.summary.work_item.is_none());
+                tool.state = ToolState::Completed;
+                conversation.link_created_pr(&[row("assistant", &tool)], cx);
+                assert!(conversation.summary.work_item.is_none());
+                conversation.link_created_pr(&[row("tool", &tool)], cx);
+                assert_eq!(
+                    conversation.summary.work_item.as_ref().unwrap().number,
+                    1370
+                );
+            });
+            cx.run_until_parked();
+            let saved = locked(&store)
+                .unwrap()
+                .sessions()
+                .unwrap()
+                .into_iter()
+                .find(|session| session.id == session_id)
+                .unwrap();
+            assert_eq!(saved.work_item.unwrap().url, tool.output);
+
+            view.update(cx, |conversation, cx| {
+                tool.output = "https://github.com/acme/app/pull/1371".into();
+                conversation.link_created_pr(&[row("tool", &tool)], cx);
+                assert_eq!(
+                    conversation.summary.work_item.as_ref().unwrap().number,
+                    1370
+                );
+            });
+        }
     }
     #[gpui::test]
     fn first_prompts_link_a_pasted_pull_request_without_replacing_a_link(

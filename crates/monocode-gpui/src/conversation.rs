@@ -1266,6 +1266,7 @@ impl Conversation {
                                 || update.delivered.is_some()
                                 || !update.follow_up_delivered.is_empty()
                                 || !update.follow_up_errors.is_empty());
+                        this.link_created_pr(&update.rows, cx);
                         this.transcript.update(cx, |v, cx| {
                             v.patch(update.start, update.rows, cx);
                             if stopping {
