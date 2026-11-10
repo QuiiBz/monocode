@@ -3412,6 +3412,9 @@ impl Conversation {
                             div()
                                 .id("empty-session-title")
                                 .role(Role::Heading)
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
                                 .flex_shrink_0()
                                 .mb_4()
                                 .px(px(10.))
@@ -3419,10 +3422,16 @@ impl Conversation {
                                 .line_height(px(28.))
                                 .text_color(content(1.))
                                 .truncate()
-                                .child(format!(
-                                    "What should we work on in {}?",
+                                .child(div().flex_shrink_0().child("What should we work on in"))
+                                .child(crate::project_settings::project_icon(
+                                    &self.project_appearance,
+                                    &self.summary.cwd,
+                                    16.,
+                                ))
+                                .child(div().min_w_0().truncate().child(format!(
+                                    "{}?",
                                     self.project_appearance.label(&self.summary.cwd)
-                                )),
+                                ))),
                         )
                     })
                     .child(self.composer(window, cx))
