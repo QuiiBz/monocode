@@ -1,7 +1,7 @@
 //! Charts drawn as dithered cells: bar, area, line, stat, gauge, donut,
 //! heatmap and progress.
 use super::{
-    color,
+    VisualView, activated, color, control,
     dither::{
         Align, CELL, Curve, Grid, Label, Motion, Scale, compact, crosshair, glow, glowing_line,
         hoverable, inked, marker, pointer, readout, swatch,
@@ -9,8 +9,8 @@ use super::{
 };
 use crate::theme::content;
 use gpui::{
-    AnyElement, App, Bounds, FontWeight, Hsla, IntoElement, Pixels, SharedString, Window, canvas,
-    div, point, prelude::*, px,
+    AnyElement, App, Bounds, Context, FontWeight, Hsla, IntoElement, Pixels, SharedString, Window,
+    canvas, div, point, prelude::*, px,
 };
 use monocode_core::visual::{ChartKind, Series, Slice, ThemeColor};
 
@@ -60,45 +60,98 @@ pub(super) fn chart(
     series: Vec<Series>,
     labels: Vec<String>,
     height: f32,
-    motion: Motion,
-    id: SharedString,
+    key: String,
+    view: &mut VisualView,
+    cx: &mut Context<VisualView>,
 ) -> AnyElement {
+    let motion = view.motion;
+    let id: SharedString = format!("visual-chart-{key}").into();
+    let interactive = series.len() > 1 && matches!(kind, ChartKind::Bar | ChartKind::Line);
+    let hidden = view.hidden_chart_series.get(&key);
     let legend = (series.len() > 1).then(|| {
         div()
             .flex()
             .flex_wrap()
             .gap_x_4()
             .gap_y_1()
-            .children(series.iter().map(|s| {
-                div()
+            .children(series.iter().enumerate().map(|(index, series)| {
+                let visible = !interactive || !hidden.is_some_and(|hidden| hidden.contains(&index));
+                let label = div()
                     .flex()
                     .items_center()
                     .gap(px(6.))
                     .text_size(px(11.))
                     .font_family(crate::fonts::mono())
-                    .text_color(content(0.6))
-                    .child(swatch(color(&s.color)))
-                    .child(s.label.clone())
+                    .text_color(content(if visible { 0.6 } else { 0.3 }))
+                    .child(swatch(if visible {
+                        color(&series.color)
+                    } else {
+                        content(0.2)
+                    }))
+                    .child(series.label.clone());
+                if !interactive {
+                    return label.into_any_element();
+                }
+                let selector = format!("visual-chart-{key}-series-{index}");
+                let click_key = key.clone();
+                let keyboard_key = key.clone();
+                control(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .aria_label(format!(
+                        "{} {}",
+                        if visible { "Hide" } else { "Show" },
+                        series.label
+                    ))
+                    .hover(|style| style.bg(content(0.06)))
+                    .focus_visible(|style| style.bg(content(0.08)))
+                    .child(label)
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.toggle_chart_series(&click_key, index, cx);
+                    }))
+                    .on_key_down(cx.listener(move |view, event, _, cx| {
+                        if activated(event) {
+                            view.toggle_chart_series(&keyboard_key, index, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .into_any_element()
             }))
     });
+    let series: Vec<Series> = series
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !interactive || !hidden.is_some_and(|hidden| hidden.contains(index)))
+        .map(|(_, series)| series)
+        .collect();
     div()
         .w_full()
         .flex()
         .flex_col()
         .gap_3()
-        .child(
-            hoverable(id).w_full().h(px(height)).child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, cx| {
-                        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-                            cartesian(kind, &series, &labels, bounds, motion, window, cx)
-                        })
-                    },
+        .child(hoverable(id).w_full().h(px(height)).when_else(
+            series.is_empty(),
+            |element| {
+                element
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(content(0.6))
+                    .child("No visible series.")
+            },
+            |element| {
+                element.child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+                                cartesian(kind, &series, &labels, bounds, motion, window, cx)
+                            })
+                        },
+                    )
+                    .size_full(),
                 )
-                .size_full(),
-            ),
-        )
+            },
+        ))
         .children(legend)
         .into_any_element()
 }

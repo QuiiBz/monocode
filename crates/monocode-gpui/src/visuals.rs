@@ -35,6 +35,7 @@ pub(crate) struct VisualView {
     scene_drag: Option<(String, Point<Pixels>)>,
     inputs: HashMap<String, InputSlot>,
     active: HashSet<String>,
+    hidden_chart_series: HashMap<String, HashSet<usize>>,
     revision: u64,
     scene_cache: HashMap<String, Rc<RefCell<Option<SceneCache>>>>,
     /// Placed in an answer's prose: no title bar, its caption underneath.
@@ -175,6 +176,7 @@ impl VisualView {
             scene_drag: None,
             inputs: HashMap::new(),
             active: HashSet::new(),
+            hidden_chart_series: HashMap::new(),
             revision: 0,
             scene_cache: HashMap::new(),
             inline: None,
@@ -209,6 +211,13 @@ impl VisualView {
             }
             Err(error) => self.error = Some(error),
         }
+    }
+    fn toggle_chart_series(&mut self, key: &str, index: usize, cx: &mut Context<Self>) {
+        let hidden = self.hidden_chart_series.entry(key.into()).or_default();
+        if !hidden.insert(index) {
+            hidden.remove(&index);
+        }
+        self.changed(cx);
     }
     fn changed(&self, cx: &mut Context<Self>) {
         cx.emit(VisualChanged);
@@ -800,8 +809,9 @@ impl VisualView {
                 series.clone(),
                 labels.clone(),
                 *height,
-                self.motion,
-                format!("visual-chart-{key}").into(),
+                key.clone(),
+                self,
+                cx,
             ),
             Node::Gauge {
                 label,
