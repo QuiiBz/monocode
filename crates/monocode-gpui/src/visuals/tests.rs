@@ -411,3 +411,85 @@ fn width_changes_emit_row_remeasure_events(cx: &mut TestAppContext) {
         "Responsive width changes must also remeasure the transcript row"
     );
 }
+
+#[gpui::test]
+fn chart_legends_toggle_independently_and_survive_runtime_updates(cx: &mut TestAppContext) {
+    let window = cx.update(|cx| {
+        cx.open_window(Default::default(), |_, cx| {
+            cx.new(|cx| {
+                VisualView::new(
+                    document(
+                        r#"
+                        const series = [
+                            {label: 'Orders', values: [10, 20], color: 'series1'},
+                            {label: 'Orders', values: [30, 40], color: 'series2'}
+                        ];
+                        return () => visual.column([
+                            visual.chart('bar', series, {height: 120}),
+                            visual.chart('line', series, {height: 120}),
+                            visual.button('Refresh', () => {})
+                        ]);
+                    "#,
+                    ),
+                    cx,
+                )
+            })
+        })
+        .unwrap()
+    });
+    let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.run_until_parked();
+    for chart in ["root/0", "root/1"] {
+        for (index, expected) in [(0, vec![0]), (1, vec![0, 1]), (0, vec![1]), (1, vec![])] {
+            let selector = match (chart, index) {
+                ("root/0", 0) => "visual-chart-root/0-series-0",
+                ("root/0", _) => "visual-chart-root/0-series-1",
+                (_, 0) => "visual-chart-root/1-series-0",
+                _ => "visual-chart-root/1-series-1",
+            };
+            let bounds = visual
+                .debug_bounds(selector)
+                .expect("Legend toggle must remain visible");
+            visual.simulate_click(bounds.center(), Default::default());
+            visual.run_until_parked();
+            window
+                .update(visual, |view, _, _| {
+                    assert!(view.error.is_none());
+                    let hidden = &view.hidden_chart_series[chart];
+                    assert_eq!(hidden.len(), expected.len());
+                    assert!(expected.iter().all(|index| hidden.contains(index)));
+                    let other = if chart == "root/0" {
+                        "root/1"
+                    } else {
+                        "root/0"
+                    };
+                    assert!(
+                        view.hidden_chart_series
+                            .get(other)
+                            .is_none_or(HashSet::is_empty)
+                    );
+                })
+                .unwrap();
+        }
+    }
+    let bounds = visual.debug_bounds("visual-chart-root/0-series-0").unwrap();
+    visual.simulate_click(bounds.center(), Default::default());
+    visual.run_until_parked();
+    visual.simulate_keystrokes("space");
+    visual.run_until_parked();
+    window
+        .update(visual, |view, _, _| {
+            assert!(view.hidden_chart_series["root/0"].is_empty());
+        })
+        .unwrap();
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    let refresh = visual.debug_bounds("visual-button-root/2").unwrap();
+    visual.simulate_click(refresh.center(), Default::default());
+    visual.run_until_parked();
+    window
+        .update(visual, |view, _, _| {
+            assert!(view.hidden_chart_series["root/0"].contains(&0));
+        })
+        .unwrap();
+}
