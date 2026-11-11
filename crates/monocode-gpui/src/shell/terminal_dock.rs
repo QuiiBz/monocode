@@ -178,7 +178,7 @@ impl Shell {
             })
             .collect()
     }
-    fn dock_open(&self, cx: &App) -> bool {
+    pub(super) fn dock_open(&self, cx: &App) -> bool {
         if self.terminal_in_panel(cx) {
             return self.panel_terminal_shown(cx);
         }
@@ -1160,6 +1160,10 @@ mod tests {
     fn the_new_layout_can_host_the_terminal_as_a_right_panel_tab(cx: &mut gpui::TestAppContext) {
         use crate::right_panel::RightTab;
         let (window, _, _) = crate::shell::tests::window(cx);
+        cx.update(|cx| {
+            super::super::bind_keys(cx);
+            crate::terminal::bind(cx);
+        });
         window
             .update(cx, |shell, window, cx| {
                 cx.set_reduce_motion(true);
@@ -1187,6 +1191,38 @@ mod tests {
         assert!(header.top() >= tabs.bottom(), "{header:?} under {tabs:?}");
         assert!(visual.debug_bounds("terminal-dock").is_none());
         assert!(visual.debug_bounds("footer-terminal").is_none());
+        window
+            .update(visual, |shell, window, cx| {
+                shell.focus_active(window, cx);
+                assert_eq!(shell.dock_focused(window, cx), None);
+            })
+            .unwrap();
+        visual.simulate_keystrokes("cmd-j");
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert!(shell.panel_terminal_shown(cx));
+                assert_eq!(shell.dock_focused(window, cx), Some(0));
+                assert_eq!(shell.terminals[&shell.workspace.project].len(), 1);
+            })
+            .unwrap();
+        visual.simulate_keystrokes("cmd-j");
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert!(!shell.panel_terminal_shown(cx));
+                assert_eq!(shell.dock_focused(window, cx), None);
+            })
+            .unwrap();
+        visual.simulate_keystrokes("cmd-j");
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, window, cx| {
+                assert!(shell.panel_terminal_shown(cx));
+                assert_eq!(shell.dock_focused(window, cx), Some(0));
+                assert_eq!(shell.terminals[&shell.workspace.project].len(), 1);
+            })
+            .unwrap();
         window
             .update(cx, |shell, window, cx| {
                 // Closing the last tab hides the panel and keeps the shell.
