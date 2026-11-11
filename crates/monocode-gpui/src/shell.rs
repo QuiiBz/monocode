@@ -9195,6 +9195,8 @@ impl Render for Shell {
                 // Title bar terminals open a new tab each time.
                 if this.terminal_in_title() {
                     this.new_title_terminal(window, cx)
+                } else if this.dock_open(cx) && this.dock_focused(window, cx).is_none() {
+                    this.focus_terminal(window, cx)
                 } else {
                     this.toggle_terminal(window, cx)
                 }
@@ -13427,6 +13429,19 @@ mod tests {
             })
             .unwrap();
         assert!(cx.debug_bounds("terminal-tab-1").is_some());
+        window
+            .update(cx, |shell, window, cx| shell.focus_active(window, cx))
+            .unwrap();
+        cx.simulate_keystrokes("cmd-j");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(shell.workspace.docks[&project].open);
+                assert_eq!(shell.workspace.docks[&project].active, 1);
+                assert_eq!(shell.terminals[&project].len(), 2);
+                assert_eq!(shell.dock_focused(window, cx), Some(1));
+            })
+            .unwrap();
         // ⌘W closes the focused terminal; the session tab stays.
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
@@ -13450,9 +13465,21 @@ mod tests {
         cx.run_until_parked();
         let dock = cx.debug_bounds("terminal-dock").unwrap();
         assert!((dock.size.width - px(360.)).abs() < px(2.), "{dock:?}");
-        // ⌘J hides it and the composer takes the keys back.
+        // ⌘J focuses the open dock and keeps the selected terminal.
         window
-            .update(cx, |shell, w, cx| shell.focus_terminal(w, cx))
+            .update(cx, |shell, window, cx| {
+                shell.focus_active(window, cx);
+                assert_eq!(shell.dock_focused(window, cx), None);
+            })
+            .unwrap();
+        cx.simulate_keystrokes("cmd-j");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(shell.workspace.docks[&project].open);
+                assert_eq!(shell.dock_focused(window, cx), Some(0));
+                assert_eq!(shell.terminals[&project].len(), 1);
+            })
             .unwrap();
         cx.simulate_keystrokes("cmd-j");
         cx.run_until_parked();
@@ -13464,6 +13491,15 @@ mod tests {
             })
             .unwrap();
         assert!(cx.debug_bounds("terminal-dock").is_none());
+        cx.simulate_keystrokes("cmd-j");
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, window, cx| {
+                assert!(shell.workspace.docks[&project].open);
+                assert_eq!(shell.dock_focused(window, cx), Some(0));
+                assert_eq!(shell.terminals[&project].len(), 1);
+            })
+            .unwrap();
     }
     #[gpui::test]
     fn closing_the_last_review_tab_removes_the_pane(cx: &mut TestAppContext) {
