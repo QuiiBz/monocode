@@ -274,12 +274,16 @@ impl Shell {
             |this, _, event: &Event, window, cx| match event {
                 Event::Close => this.close_app_search(window, cx),
                 Event::Open(target, query) => {
+                    let panel = this.app_search.as_ref().is_some_and(|search| search.panel);
                     this.close_app_search(window, cx);
                     match target {
-                        Target::Conversation(id) => this.open_search_session(*id, None, window, cx),
+                        Target::Conversation(id) => {
+                            this.open_search_session(*id, None, panel, window, cx)
+                        }
                         Target::Message { session, row } => this.open_search_session(
                             *session,
                             Some((*row, query.clone())),
+                            panel,
                             window,
                             cx,
                         ),
@@ -300,8 +304,16 @@ impl Shell {
                                     p.navigate_file(*line as usize, *column as usize, cx)
                                 });
                             }
+                            if panel && this.active_review(cx).is_some() {
+                                this.clear_saved_search_query();
+                            }
                         }
-                        Target::Project(path) => this.select_project(path.clone(), window, cx),
+                        Target::Project(path) => {
+                            this.select_project(path.clone(), window, cx);
+                            if panel {
+                                this.clear_saved_search_query();
+                            }
+                        }
                     }
                 }
             },
@@ -324,10 +336,16 @@ impl Shell {
         self.invalidate_chrome(cx);
         cx.notify();
     }
+    fn clear_saved_search_query(&mut self) {
+        if let Some((query, _)) = &mut self.saved_search {
+            query.clear();
+        }
+    }
     fn open_search_session(
         &mut self,
         id: i64,
         jump: Option<(usize, String)>,
+        panel: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -336,6 +354,9 @@ impl Shell {
             if let Some((row, query)) = jump {
                 view.update(cx, |v, cx| v.reveal_search(row, query, cx));
             }
+            if panel && self.workspace.active == Some(id) {
+                self.clear_saved_search_query();
+            }
             return;
         }
         if let Some(monos) = &self.monos
@@ -343,6 +364,9 @@ impl Shell {
         {
             if let Some((row, query)) = jump {
                 view.update(cx, |v, cx| v.reveal_search(row, query, cx));
+            }
+            if panel {
+                self.clear_saved_search_query();
             }
             return;
         }
@@ -367,6 +391,9 @@ impl Shell {
                         this.open(id, window, cx);
                         if let Some((row, query)) = jump {
                             this.sessions[&id].update(cx, |v, cx| v.reveal_search(row, query, cx));
+                        }
+                        if panel && this.workspace.active == Some(id) {
+                            this.clear_saved_search_query();
                         }
                     }
                     Err(error) => {
@@ -468,7 +495,7 @@ mod tests {
         cx.simulate_keystrokes(window.into(), "enter");
         cx.run_until_parked();
         window
-            .update(cx, |shell, _, cx| {
+            .update(cx, |shell, window, cx| {
                 assert!(shell.app_search.is_none());
                 assert_eq!(shell.workspace.active, Some(a));
                 assert_eq!(shell.workspace.project, "/work/another-project");
@@ -476,8 +503,109 @@ mod tests {
                     shell.sessions[&b].read(cx).input.read(cx).content,
                     "preserve this draft"
                 );
+                shell.open_app_search(window, cx);
+                assert_eq!(
+                    shell.app_search.as_ref().unwrap().view.read(cx).draft(cx).0,
+                    "Needle"
+                );
             })
             .unwrap();
+    }
+    #[gpui::test]
+    fn search_panel_clears_query_after_navigation(cx: &mut TestAppContext) {
+        let (window, conversation, _) = crate::shell::tests::window(cx);
+        let saved_conversation = window
+            .update(cx, |shell, _, _| {
+                shell.workspace.preferences.search_panel = true;
+                locked(&shell.store)
+                    .unwrap()
+                    .create("codex", "/work/another-project")
+                    .unwrap()
+                    .id
+            })
+            .unwrap();
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").to_owned();
+        for (target, scope, navigates) in [
+            (
+                Target::Conversation(conversation),
+                Scope::Conversations,
+                true,
+            ),
+            (
+                Target::Message {
+                    session: conversation,
+                    row: 0,
+                },
+                Scope::Conversations,
+                true,
+            ),
+            (
+                Target::File {
+                    path: file.clone(),
+                    location: None,
+                },
+                Scope::Files,
+                true,
+            ),
+            (
+                Target::File {
+                    path: file,
+                    location: Some((1, 1)),
+                },
+                Scope::Files,
+                true,
+            ),
+            (
+                Target::Project("/work/monocode".into()),
+                Scope::Projects,
+                true,
+            ),
+            (
+                Target::Conversation(saved_conversation),
+                Scope::Conversations,
+                true,
+            ),
+            (Target::Conversation(i64::MAX), Scope::Conversations, false),
+        ] {
+            window
+                .update(cx, |shell, window, cx| {
+                    shell.open_app_search(window, cx);
+                    let search = shell.app_search.as_ref().unwrap().view.clone();
+                    search.update(cx, |search, cx| {
+                        search.restore_draft(("query".into(), scope), cx);
+                        cx.emit(Event::Open(target.clone(), "query".into()));
+                    });
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, window, cx| {
+                    assert!(shell.app_search.is_none());
+                    if navigates {
+                        match &target {
+                            Target::Conversation(id) | Target::Message { session: id, .. } => {
+                                assert_eq!(shell.workspace.active, Some(*id));
+                            }
+                            Target::File { path, .. } => {
+                                assert!(shell.active_review(cx).unwrap().read(cx).state.tabs.iter().any(
+                                    |tab| matches!(tab, crate::review::ReviewTab::File { path: opened, .. } if opened == path)
+                                ));
+                            }
+                            Target::Project(path) => assert_eq!(&shell.workspace.project, path),
+                        }
+                    } else {
+                        assert_eq!(shell.error.as_deref(), Some("Conversation no longer exists"));
+                    }
+                    shell.open_app_search(window, cx);
+                    assert_eq!(
+                        shell.app_search.as_ref().unwrap().view.read(cx).draft(cx),
+                        (if navigates { "" } else { "query" }.into(), scope)
+                    );
+                    shell.close_app_search(window, cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
     }
     #[gpui::test]
     fn app_search_shares_tab_sizing_order_cycle_and_close(cx: &mut TestAppContext) {
@@ -603,7 +731,13 @@ mod tests {
         window
             .update(visual, |shell, w, cx| {
                 assert!(shell.app_search.is_none());
-                assert!(shell.saved_search.is_some());
+                assert_eq!(shell.saved_search, Some(("scope query".into(), Scope::All)));
+                shell.open_app_search(w, cx);
+                assert_eq!(
+                    shell.app_search.as_ref().unwrap().view.read(cx).draft(cx),
+                    ("scope query".into(), Scope::All)
+                );
+                shell.close_app_search(w, cx);
                 // Switching back to the page style takes effect on the next open.
                 shell.workspace.preferences.search_panel = false;
                 shell.open_app_search(w, cx);
