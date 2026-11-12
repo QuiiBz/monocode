@@ -11,6 +11,7 @@ use gpui::{
     Subscription, Task, Window, canvas, div, fill, point, prelude::*, px, relative, size,
 };
 use monocode_core::{
+    project_appearance::ProjectAppearance,
     search::{self, Hit, Scope, Target},
     store::Session,
     transcript::Row,
@@ -34,7 +35,7 @@ pub(crate) struct Sources {
     pub live: HashMap<i64, Arc<Vec<Row>>>,
     pub projects: Vec<String>,
     pub recent: Vec<String>,
-    pub logos: HashMap<String, String>,
+    pub project_appearance: HashMap<String, ProjectAppearance>,
     pub classic: bool,
     pub panel: bool,
 }
@@ -46,7 +47,7 @@ pub(crate) struct SearchView {
     live: HashMap<i64, Arc<Vec<Row>>>,
     projects: Vec<String>,
     recent: Vec<String>,
-    logos: HashMap<String, String>,
+    project_appearance: HashMap<String, ProjectAppearance>,
     classic: bool,
     original_header: Option<f32>,
     /// Floating command panel; otherwise the original full page.
@@ -127,7 +128,7 @@ impl SearchView {
             live: sources.live,
             projects: sources.projects,
             recent: sources.recent,
-            logos: sources.logos,
+            project_appearance: sources.project_appearance,
             classic: sources.classic,
             original_header: None,
             panel: sources.panel,
@@ -653,20 +654,13 @@ impl SearchView {
             Target::File { path, .. } => {
                 crate::file_icons::file_type_icon(&search::project_name(path), false, false, 15.)
             }
-            Target::Project(path) => self
-                .logos
-                .get(path)
-                .map(|logo| {
-                    crate::image_memory::thumbnail(std::path::PathBuf::from(logo))
-                        .size(px(16.))
-                        .rounded_sm()
-                        .into_any_element()
-                })
-                .unwrap_or_else(|| {
-                    icon("folder", 14.)
-                        .text_color(content(0.6))
-                        .into_any_element()
-                }),
+            Target::Project(path) => crate::project_settings::project_icon(
+                self.project_appearance
+                    .get(path)
+                    .unwrap_or(&ProjectAppearance::default()),
+                &search::project_name(path),
+                16.,
+            ),
         };
         let text = StyledText::new(hit.title.clone()).with_highlights(
             hit.highlights.iter().cloned().map(|range| {
@@ -781,16 +775,13 @@ impl SearchView {
                         false,
                         16.,
                     ),
-                    Target::Project(path) => self
-                        .logos
-                        .get(path)
-                        .map(|logo| {
-                            crate::image_memory::thumbnail(std::path::PathBuf::from(logo))
-                                .size(px(14.))
-                                .rounded_sm()
-                                .into_any_element()
-                        })
-                        .unwrap_or_else(|| icon("folder", 14.).into_any_element()),
+                    Target::Project(path) => crate::project_settings::project_icon(
+                        self.project_appearance
+                            .get(path)
+                            .unwrap_or(&ProjectAppearance::default()),
+                        &search::project_name(path),
+                        14.,
+                    ),
                 };
                 let text = StyledText::new(hit.title.clone()).with_highlights(
                     hit.highlights.iter().cloned().map(|range| {
