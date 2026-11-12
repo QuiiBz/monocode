@@ -72,6 +72,7 @@ impl QuestionCard {
                     if !this.request.items[ix].multiple && !field.read(cx).content.trim().is_empty()
                     {
                         this.selected[ix].clear();
+                        this.highlighted = None;
                     }
                     cx.notify();
                 })
@@ -161,21 +162,22 @@ impl QuestionCard {
             .enumerate()
             .map(|(ix, item)| {
                 let mut answers = self.selected[ix].clone();
-                let text = self.fields[ix].read(cx).content.trim();
-                if item.allow_custom && !text.is_empty() {
+                let text = &self.fields[ix].read(cx).content;
+                if item.allow_custom && !text.trim().is_empty() {
                     if !item.multiple {
                         answers.clear();
                     }
-                    answers.push(text.to_owned());
+                    answers.push(text.to_string());
                 }
                 answers
             })
             .collect()
     }
     fn answered(&self, ix: usize, cx: &App) -> bool {
-        !self.selected[ix].is_empty()
-            || (self.request.items[ix].allow_custom
-                && !self.fields[ix].read(cx).content.trim().is_empty())
+        let field = self.fields[ix].read(cx);
+        !field.is_composing()
+            && (!self.selected[ix].is_empty()
+                || (self.request.items[ix].allow_custom && !field.content.trim().is_empty()))
     }
     fn go(&mut self, step: usize, cx: &mut Context<Self>) {
         if step == self.step || step >= self.request.items.len() {
@@ -473,7 +475,8 @@ impl QuestionCard {
         let last = ix + 1 == self.request.items.len();
         // Single choices advance on click; a typed or multiple answer needs a
         // button. A revisited page offers the way forward too.
-        let proceed = ready && (item.multiple || typing || ix < self.reached || !item.allow_custom);
+        let custom = item.allow_custom && !field.read(cx).content.trim().is_empty();
+        let proceed = ready && (item.multiple || custom || ix < self.reached || !item.allow_custom);
         div()
             .m(px(6.))
             .mt(px(4.))
@@ -525,7 +528,11 @@ impl QuestionCard {
                     )
                     .debug_selector(|| "question-continue".into())
                     .child(if last { "Submit" } else { "Next" })
-                    .on_click(cx.listener(|this, _, _, cx| this.advance(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.answered(this.step, cx) {
+                            this.advance(cx);
+                        }
+                    })),
                 )
             })
     }
@@ -888,6 +895,84 @@ mod tests {
         );
     }
     #[gpui::test]
+    fn custom_only_pages_and_free_text_submit_with_enter(cx: &mut TestAppContext) {
+        let (window, replies, _events) = card(cx);
+        cx.update(input::bind);
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        window
+            .update(visual, |card, window, cx| {
+                card.request.items[1].options.clear();
+                card.fields[0].update(cx, |field, cx| field.set_text("   ".into(), cx));
+                assert!(!card.answered(0, cx));
+                card.fields[0].update(cx, |field, cx| field.set_text("First custom".into(), cx));
+                window.focus(&card.fields[0].focus_handle(cx), cx);
+            })
+            .unwrap();
+        visual.simulate_keystrokes("enter");
+        window
+            .update(visual, |card, window, cx| {
+                assert_eq!(card.step, 1);
+                card.fields[1].update(cx, |field, cx| field.set_text("Second custom".into(), cx));
+                window.focus(&card.fields[1].focus_handle(cx), cx);
+            })
+            .unwrap();
+        visual.simulate_keystrokes("enter");
+        assert_eq!(
+            *replies.borrow(),
+            vec![Some(vec![
+                vec!["First custom".into()],
+                vec!["Second custom".into()]
+            ])]
+        );
+    }
+    #[gpui::test]
+    fn typing_clears_preset_and_keyboard_highlight_and_keeps_multiple(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let (window, replies, _events) = card(cx);
+        cx.update(input::bind);
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        click(visual, "question-option-0-0");
+        click(visual, "question-prev");
+        window
+            .update(visual, |card, window, cx| {
+                card.highlighted = Some(1);
+                card.fields[0].update(cx, |field, cx| {
+                    field.replace_and_mark_text_in_range(None, "に", Some(1..1), window, cx)
+                });
+                assert!(!card.answered(0, cx));
+                card.fields[0].update(cx, |field, cx| {
+                    field.replace_text_in_range(None, "日本 🙂", window, cx)
+                });
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(visual, |card, window, cx| {
+                assert!(card.selected[0].is_empty());
+                assert!(card.highlighted.is_none());
+                window.focus(&card.focus, cx);
+            })
+            .unwrap();
+        visual.simulate_keystrokes("enter");
+        click(visual, "question-option-1-0");
+        window
+            .update(visual, |card, window, cx| {
+                card.fields[1].update(cx, |field, cx| {
+                    field.replace_text_in_range(None, "extra", window, cx)
+                });
+            })
+            .unwrap();
+        click(visual, "question-continue");
+        assert_eq!(
+            *replies.borrow(),
+            vec![Some(vec![
+                vec!["日本 🙂".into()],
+                vec!["A".into(), "extra".into()]
+            ])]
+        );
+    }
+    #[gpui::test]
     fn typed_answers_replace_single_choices_and_skipping_everything_declines(
         cx: &mut TestAppContext,
     ) {
@@ -912,5 +997,70 @@ mod tests {
         click(visual, "question-skip");
         click(visual, "question-skip");
         assert_eq!(*replies.borrow(), vec![None]);
+    }
+}
+
+#[cfg(test)]
+mod custom_submission_tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use monocode_core::agent::{QuestionItem, QuestionOption};
+
+    #[gpui::test]
+    fn custom_answers_survive_blur_and_submit_exact_text(cx: &mut TestAppContext) {
+        let window = cx.update(|cx| {
+            input::bind(cx);
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| {
+                    QuestionCard::new(
+                        Question {
+                            id: "request".into(),
+                            title: "Question".into(),
+                            auto_resolve_at: None,
+                            items: vec![QuestionItem {
+                                id: "q".into(),
+                                prompt: "Choose".into(),
+                                multiple: false,
+                                allow_custom: true,
+                                options: vec![QuestionOption {
+                                    id: "a".into(),
+                                    label: "A".into(),
+                                    description: String::new(),
+                                }],
+                            }],
+                        },
+                        cx,
+                    )
+                })
+            })
+            .unwrap()
+        });
+        cx.refresh().unwrap();
+        window
+            .update(cx, |card, window, cx| {
+                card.fields[0].update(cx, |field, cx| field.set_text("  Custom 🙂  ".into(), cx));
+                window.focus(&card.focus, cx);
+            })
+            .unwrap();
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        let submit = visual
+            .debug_bounds("question-continue")
+            .expect("valid custom answer must keep Submit after blur");
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let received = answers.clone();
+        window
+            .update(visual, |_, _, cx| {
+                cx.subscribe(&cx.entity(), move |_, _, event: &Answered, _| {
+                    received.borrow_mut().push(event.answers.clone())
+                })
+                .detach();
+            })
+            .unwrap();
+        visual.simulate_click(submit.center(), Default::default());
+        assert_eq!(
+            *answers.borrow(),
+            vec![Some(vec![vec!["  Custom 🙂  ".to_owned()]])]
+        );
     }
 }
