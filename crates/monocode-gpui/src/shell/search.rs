@@ -255,12 +255,7 @@ impl Shell {
                     recent,
                     classic: self.workspace.boxy_layout(),
                     panel,
-                    logos: self
-                        .workspace
-                        .project_appearance
-                        .iter()
-                        .filter_map(|(path, a)| a.logo.clone().map(|logo| (path.clone(), logo)))
-                        .collect(),
+                    project_appearance: self.workspace.project_appearance.clone(),
                 },
                 cx,
             )
