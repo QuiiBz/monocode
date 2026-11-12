@@ -3,15 +3,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const env = {
-  ...process.env,
-  CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS || "1",
-};
 
 function run(command, args, capture = false) {
   const result = spawnSync(command, args, {
     cwd: root,
-    env,
     encoding: "utf8",
     stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
   });
