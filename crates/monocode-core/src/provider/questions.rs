@@ -451,15 +451,17 @@ mod tests {
         }
         let mut protocol = protocol(Kind::Codex);
         protocol.frame(json!({"id":"request","method":"item/tool/requestUserInput","params":{"questions":[{"id":"q","question":"Choose"}]}}), &mut Vec::new()).unwrap();
-        assert!(protocol
-            .respond_with_answer(
-                Control {
-                    id: json!("request").to_string(),
-                    decision: Decision::Answer(vec![vec!["answer".into()]])
-                },
-                &mut FailedWriter
-            )
-            .is_err());
+        assert!(
+            protocol
+                .respond_with_answer(
+                    Control {
+                        id: json!("request").to_string(),
+                        decision: Decision::Answer(vec![vec!["answer".into()]])
+                    },
+                    &mut FailedWriter
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -479,13 +481,14 @@ mod tests {
                 .respond_with_answer(
                     Control {
                         id: question_id.clone(),
-                        decision: Decision::Answer(vec![vec!["B".into()]]),
+                        decision: Decision::Answer(vec![vec![" Custom 🙂 ".into()]]),
                     },
                     &mut output,
                 )
                 .unwrap();
             assert!(events.is_empty());
             let request: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(request["params"]["input"][0]["text"], "Choose\n Custom 🙂 ");
             let receipt = if accepted {
                 json!({"id":request["id"],"result":{}})
             } else {
@@ -496,19 +499,65 @@ mod tests {
                 assert_eq!(
                     events,
                     vec![
-                        Event::QuestionAnswered("Choose\nB".into()),
+                        Event::QuestionAnswered("Choose\n Custom 🙂 ".into()),
                         Event::QuestionResolved(question_id.clone())
                     ]
                 );
                 assert!(protocol.frame(receipt, &mut Vec::new()).unwrap().is_empty());
             } else {
-                assert!(events
-                    .iter()
-                    .any(|event| matches!(event, Event::Question(_))));
-                assert!(!events
-                    .iter()
-                    .any(|event| matches!(event, Event::QuestionAnswered(_))));
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, Event::Question(_)))
+                );
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, Event::QuestionAnswered(_)))
+                );
             }
+        }
+    }
+    #[test]
+    fn custom_answers_reach_native_provider_responses_exactly_once() {
+        let custom = "  Custom 🙂  ";
+        for (kind, method) in [
+            (Kind::Codex, "item/tool/requestUserInput"),
+            (Kind::Grok, "_x.ai/ask_user_question"),
+        ] {
+            let mut protocol = protocol(kind);
+            let events = protocol.frame(json!({"id":"request","method":method,"params":{"questions":[{"id":"q","question":"Choose","isOther":true,"options":[{"label":"A"}]}]}}), &mut Vec::new()).unwrap();
+            let Event::Question(question) = &events[0] else {
+                panic!("expected question")
+            };
+            assert!(question.items[0].allow_custom);
+            let question_id = question.id.clone();
+            let response = answer(
+                &mut protocol,
+                &events[0],
+                vec![vec![custom.into()]],
+                &format!("Choose\n{custom}"),
+            );
+            if kind == Kind::Codex {
+                assert_eq!(
+                    response["result"]["answers"]["q"]["answers"],
+                    json!([custom])
+                );
+            } else {
+                assert_eq!(response["result"]["answers"]["Choose"], custom);
+            }
+            assert!(
+                protocol
+                    .respond_with_answer(
+                        Control {
+                            id: question_id,
+                            decision: Decision::Answer(vec![vec![custom.into()]])
+                        },
+                        &mut Vec::new()
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
     #[test]
@@ -547,12 +596,12 @@ mod tests {
         let response = answer(
             &mut p,
             &events[0],
-            vec![vec!["Native".into()]],
-            "Name?\nNative",
+            vec![vec!["  Native 🙂  ".into()]],
+            "Name?\n  Native 🙂  ",
         );
         assert_eq!(
             response["response"]["response"]["updatedInput"]["answers"]["Name?"],
-            "Native"
+            "  Native 🙂  "
         );
         assert_eq!(
             response["response"]["response"]["updatedInput"]["questions"][0]["question"],
@@ -588,9 +637,11 @@ mod tests {
             let mut out = Vec::new();
             let events = p.frame(json!({"id":1,"method":"item/tool/requestUserInput","params":{"questions":rows}}), &mut out).unwrap();
             assert!(events.iter().any(|event| matches!(event, Event::Status(_))));
-            assert!(!events
-                .iter()
-                .any(|event| matches!(event, Event::Question(_) | Event::Done)));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Event::Question(_) | Event::Done))
+            );
             let response: Value = serde_json::from_slice(&out).unwrap();
             assert_eq!(response["id"], 1);
             assert_eq!(response["result"]["answers"], json!({}));

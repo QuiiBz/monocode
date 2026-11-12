@@ -28,6 +28,11 @@ for line in sys.stdin:
         else:
             send({'id': 'question', 'method': 'item/tool/requestUserInput', 'params': {'questions': [{'id': 'skip', 'question': 'Skip?'}, {'id': 'choose', 'question': 'Choose', 'options': [{'label': 'B'}, {'label': 'C'}]}, {'id': 'details', 'question': 'Details?'}]}})
     elif method == 'turn/steer' or value.get('id') == 'question':
+        custom = 'Custom 🙂\n' * 400
+        if method == 'turn/steer':
+            assert value['params']['input'][0]['text'] == 'Choose\nB\nC\n\nDetails?\n' + custom
+        else:
+            assert value['result']['answers']['details']['answers'] == [custom]
         if method == 'turn/steer':
             send({'id': value['id'], 'result': {}})
         deadline = time.monotonic() + 5
