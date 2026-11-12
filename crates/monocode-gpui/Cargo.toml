@@ -104,11 +104,16 @@ gpui-pre-windows = { path = "../../vendor/gpui-pre-windows" }
 
 [profile.native-dev]
 inherits = "dev"
-debug = 0
-incremental = false
-
-[profile.native-dev.package."*"]
+lto = "off"
 opt-level = 1
+debug = false
+strip = true
 
-[profile.native-dev.package.monocode-gpui]
-opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

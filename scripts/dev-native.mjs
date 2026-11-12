@@ -24,7 +24,7 @@ export async function startDev({
   debounce = 300,
 } = {}) {
   const bundle = platform === "darwin";
-  const buildEnv = { ...env, CARGO_BUILD_JOBS: env.CARGO_BUILD_JOBS || "1" };
+  const buildEnv = { ...env };
   const launch = (command, argv, options = {}) => track(spawnProcess(command, argv, {
     cwd: root, env: buildEnv, stdio: "inherit", ...options,
   }));
