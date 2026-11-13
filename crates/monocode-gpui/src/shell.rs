@@ -1335,13 +1335,7 @@ impl Shell {
         }
         this
     }
-    fn update_chat_visibility(&mut self, cx: &mut Context<Self>) {
-        if let Some(inbox) = &self.inbox {
-            let active = self.active_app_view == Some(app_views::AppView::Inbox)
-                && self.settings.is_none()
-                && !self.search_page();
-            inbox.update(cx, |inbox, cx| inbox.set_active(active, cx));
-        }
+    fn visible_conversations(&self, cx: &App) -> HashSet<i64> {
         // Every pane of the active tab is on screen, not just the focused one.
         let mut shown: HashSet<i64> = match self.workspace.active_tab() {
             Some(tab)
@@ -1354,6 +1348,9 @@ impl Shell {
             }
             _ => HashSet::new(),
         };
+        shown.retain(|id| {
+            !self.workspace.is_detached_pane(*id) && !self.workspace.mono_panes.contains_key(id)
+        });
         // A session opened in the Mono details panel is on screen too. Left
         // out, it was trimmed as inactive and the panel showed it empty.
         if self.mono_active(cx)
@@ -1368,12 +1365,23 @@ impl Shell {
                     .and_then(|m| m.read(cx).routed_session()),
             );
         }
+        shown
+    }
+    fn update_chat_visibility(&mut self, cx: &mut Context<Self>) {
+        if let Some(inbox) = &self.inbox {
+            let active = self.active_app_view == Some(app_views::AppView::Inbox)
+                && self.settings.is_none()
+                && !self.search_page();
+            inbox.update(cx, |inbox, cx| inbox.set_active(active, cx));
+        }
+        let shown = self.visible_conversations(cx);
         // Hidden tabs keep their prepared image and any in-flight load. Only
         // closing a tab/pane should discard its background.
         let open: HashSet<i64> = self.workspace.open_sessions().into_iter().collect();
         self.backgrounds.retain(|id, _| open.contains(id));
         for &id in &shown {
             self.ensure_session(id, cx);
+            self.refresh_session_mark(id, cx);
             self.history_clock += 1;
             self.history_recency.insert(id, self.history_clock);
         }
@@ -1501,19 +1509,21 @@ impl Shell {
         };
         let session = view.read(cx);
         let busy = session.responding();
-        let focused = !self.app_view_open() && self.workspace.active == Some(id);
+        let conversation_visible = self.visible_conversations(cx).contains(&id);
         if busy {
             self.busy_sessions.insert(id);
             self.unseen_finished.remove(&id);
-        } else if session.busy {
-            // Explicit cancellation is already idle in the UI. The worker is
-            // only finishing its save, so it must not announce a completed turn.
+        } else if session.busy || session.notification_was_cancelled() {
+            // A cancelled turn must not announce completion when its worker saves.
             self.busy_sessions.remove(&id);
             self.unseen_finished.remove(&id);
-        } else if self.busy_sessions.remove(&id) && !focused && !session.summary.archived {
+        } else if self.busy_sessions.remove(&id)
+            && !conversation_visible
+            && !session.summary.archived
+        {
             self.unseen_finished.insert(id);
         }
-        if focused || session.summary.archived {
+        if conversation_visible || session.summary.archived {
             self.unseen_finished.remove(&id);
         }
         let state = if busy {
@@ -6234,8 +6244,8 @@ impl Shell {
             mark.update(cx, |mark, cx| mark.set_size(side, cx));
         }
         let work_item = self.work_item_badge(id, compact, cx);
-        let has_badges = mode.is_some()
-            || self.automation_state.session_automations.contains_key(&id);
+        let has_badges =
+            mode.is_some() || self.automation_state.session_automations.contains_key(&id);
         let session = self.session_metadata(id, cx);
         let active = self.selected_sessions.contains(&id)
             || (self.workspace.active == Some(id)
@@ -6648,14 +6658,18 @@ impl Shell {
                     .children(self.session_marks.get(&id).cloned())
                     .child("Working…")
                     .into_any()
-            } else if detailed && self.unseen_finished.contains(&id) {
+            } else if !session.responding() && self.unseen_finished.contains(&id) {
                 div()
+                    .id(("session-done", id as usize))
+                    .debug_selector(move || format!("session-done-{id}"))
+                    .role(Role::Image)
+                    .aria_label("Done")
                     .flex()
                     .items_center()
                     .gap_1()
                     .text_color(rgb(0x2dd4bf))
                     .child(icon("check-circle-2", 14.).text_color(rgb(0x2dd4bf)))
-                    .child("Done")
+                    .when(detailed, |d| d.child("Done"))
                     .into_any()
             } else if session.has_saved_draft() {
                 div()
@@ -6677,6 +6691,7 @@ impl Shell {
                     .into_any()
             } else {
                 div()
+                    .debug_selector(move || format!("session-time-{id}"))
                     .child(monocode_core::time::relative(
                         session.summary.updated_at,
                         monocode_core::time::now_ms(),
@@ -9552,6 +9567,164 @@ mod tests {
             })
             .unwrap();
     }
+    #[gpui::test]
+    fn completion_requires_a_visible_conversation(cx: &mut TestAppContext) {
+        let (window, target, other) = window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                for classic in [false, true] {
+                    for boxy in [false, true] {
+                        shell.workspace.classic_layout = classic;
+                        shell.workspace.new_layout_boxy = boxy;
+                        shell.open(other, window, cx);
+                        shell.busy_sessions.insert(target);
+                        shell.refresh_session_mark(target, cx);
+                        assert!(shell.unseen_finished.contains(&target));
+                        shell.persist(cx);
+                        shell.update_chat_visibility(cx);
+                        shell.refresh_session_mark(other, cx);
+                        assert!(shell.unseen_finished.contains(&target));
+                        shell.active_app_view = Some(app_views::AppView::Notes);
+                        shell.workspace.open(target);
+                        shell.persist(cx);
+                        assert!(shell.unseen_finished.contains(&target));
+                        shell.active_app_view = None;
+                        if let Some(monos) = shell.monos.clone() {
+                            monos.update(cx, |monos, _| monos.active = Some("hidden-chat".into()));
+                            shell.refresh_session_mark(target, cx);
+                            assert!(shell.unseen_finished.contains(&target));
+                            monos.update(cx, |monos, _| monos.active = None);
+                        }
+                        let review_pane = shell.workspace.next_pane_id();
+                        shell.workspace.review_owners.insert(review_pane, target);
+                        shell.workspace.open(review_pane);
+                        shell.persist(cx);
+                        assert!(shell.unseen_finished.contains(&target));
+                        assert!(!shell.visible_conversations(cx).contains(&target));
+                        shell.open(target, window, cx);
+                        assert!(!shell.unseen_finished.contains(&target));
+                        shell.busy_sessions.insert(target);
+                        shell.refresh_session_mark(target, cx);
+                        assert!(!shell.unseen_finished.contains(&target));
+                        shell.open(other, window, cx);
+                        shell
+                            .workspace
+                            .split(target, crate::pane_layout::SplitDir::Right);
+                        shell.workspace.active = Some(other);
+                        assert!(shell.visible_conversations(cx).contains(&target));
+                        shell.busy_sessions.insert(target);
+                        shell.refresh_session_mark(target, cx);
+                        assert!(!shell.unseen_finished.contains(&target));
+                        shell.workspace.close_pane(target);
+                    }
+                }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn cancelled_background_work_does_not_announce_completion(cx: &mut TestAppContext) {
+        let (window, target, _) = window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.sessions[&target].update(cx, |session, _| session.busy = true);
+                shell.refresh_session_mark(target, cx);
+                shell.sessions[&target].update(cx, |session, cx| session.stop_if_busy(cx));
+                shell.refresh_session_mark(target, cx);
+                assert!(!shell.unseen_finished.contains(&target));
+                shell.refresh_session_mark(target, cx);
+                assert!(!shell.unseen_finished.contains(&target));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn restarting_or_archiving_clears_unseen_completion(cx: &mut TestAppContext) {
+        let (window, target, _) = window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.busy_sessions.insert(target);
+                shell.refresh_session_mark(target, cx);
+                assert!(shell.unseen_finished.contains(&target));
+                shell.sessions[&target].update(cx, |session, _| session.busy = true);
+                shell.refresh_session_mark(target, cx);
+                assert!(!shell.unseen_finished.contains(&target));
+                shell.sessions[&target].update(cx, |session, _| session.busy = false);
+                shell.refresh_session_mark(target, cx);
+                assert!(shell.unseen_finished.contains(&target));
+                shell.sessions[&target].update(cx, |session, _| session.summary.archived = true);
+                shell.refresh_session_mark(target, cx);
+                assert!(!shell.unseen_finished.contains(&target));
+                shell.sessions[&target].update(cx, |session, _| session.summary.archived = false);
+                shell.refresh_session_mark(target, cx);
+                assert!(!shell.unseen_finished.contains(&target));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn completion_suffix_replaces_time_in_both_sidebar_sizes(cx: &mut TestAppContext) {
+        for boxy in [false, true] {
+            let (window, target, other) = window(cx);
+            let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+            visual.simulate_mouse_move(gpui::point(px(1500.), px(900.)), None, Default::default());
+            let done_selector = Box::leak(format!("session-done-{target}").into_boxed_str());
+            let row_selector = Box::leak(format!("sidebar-session-{target}").into_boxed_str());
+            let time_selector = Box::leak(format!("session-time-{target}").into_boxed_str());
+            for compact in [false, true] {
+                window
+                    .update(visual, |shell, window, cx| {
+                        shell.workspace.new_layout_boxy = boxy;
+                        shell.workspace.compact_session_cards = compact;
+                        shell.layout_changed(cx);
+                        shell.session_hover = None;
+                        shell.sessions[&target].update(cx, |session, _| {
+                            session.summary.cwd = "/work/monocode".into();
+                        });
+                        shell.open(other, window, cx);
+                        shell.busy_sessions.insert(target);
+                        shell.refresh_session_mark(target, cx);
+                        assert!(shell.unseen_finished.contains(&target));
+                        assert!(shell.sidebar_session_ids(cx).contains(&target));
+                        shell.invalidate_chrome(cx);
+                        cx.notify();
+                    })
+                    .unwrap();
+                visual.run_until_parked();
+                visual.refresh().unwrap();
+                assert!(
+                    visual.debug_bounds(row_selector).is_some(),
+                    "row missing: boxy={boxy}, compact={compact}"
+                );
+                window
+                    .update(visual, |shell, _, _| {
+                        assert!(shell.unseen_finished.contains(&target));
+                        assert_ne!(shell.session_hover, Some(target));
+                    })
+                    .unwrap();
+                assert!(
+                    visual.debug_bounds(done_selector).is_some(),
+                    "done missing: boxy={boxy}, compact={compact}"
+                );
+                assert!(visual.debug_bounds(time_selector).is_none());
+                let row_bounds = visual.debug_bounds(row_selector).unwrap();
+                let done_bounds = visual.debug_bounds(done_selector).unwrap();
+                assert_eq!(row_bounds.right() - done_bounds.right(), px(9.));
+                window
+                    .update(visual, |shell, window, cx| {
+                        shell.open(target, window, cx);
+                        shell.invalidate_chrome(cx);
+                        cx.notify();
+                    })
+                    .unwrap();
+                visual.run_until_parked();
+                visual.refresh().unwrap();
+                assert!(visual.debug_bounds(done_selector).is_none());
+                assert!(visual.debug_bounds(time_selector).is_some());
+            }
+        }
+    }
+
     #[gpui::test]
     fn hover_preview_waits_and_never_materializes_a_conversation(cx: &mut TestAppContext) {
         let (window, _, _) = window(cx);
