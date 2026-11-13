@@ -538,11 +538,96 @@ mod tests {
             for session in [first, second] {
                 let project = shell.session_metadata(session, cx).summary.cwd.clone();
                 let copy = shell.tab_copy(session, cx);
-                assert!(matches!(&copy.panes[copy.focus].mark, PaneMark::Project(path) if path == &project));
+                assert!(matches!(&copy.panes[copy.focus].mark, PaneMark::Project(path, _) if path == &project));
             }
             shell.workspace.classic_layout = true;
             assert!(matches!(&shell.tab_copy(first, cx).panes[0].mark, PaneMark::Session(_, _)));
         }).unwrap();
+    }
+
+    #[gpui::test]
+    fn project_work_marks_follow_each_session_and_cancel(cx: &mut TestAppContext) {
+        let (window, first, second) = window(cx);
+        window.update(cx, |shell, _, cx| {
+            shell.workspace.classic_layout = false;
+            shell.sessions[&first].update(cx, |chat, _| chat.busy = true);
+            for (session, expected) in [(first, true), (second, false)] {
+                let copy = shell.tab_copy(session, cx);
+                assert!(matches!(&copy.panes[copy.focus].mark, PaneMark::Project(path, working) if *working == expected && path == &shell.session_metadata(session, cx).summary.cwd));
+            }
+            shell.sessions[&first].update(cx, |chat, cx| chat.stop_if_busy(cx));
+            assert!(!shell.session_metadata(first, cx).responding());
+            let copy = shell.tab_copy(first, cx);
+            assert!(matches!(&copy.panes[copy.focus].mark, PaneMark::Project(_, false)));
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn mono_launch_refreshes_marks_after_manager_update(cx: &mut TestAppContext) {
+        let (window, _, _) = window(cx);
+        let (owner, manager, summary) = window
+            .update(cx, |shell, _, cx| {
+                let summary = locked(&shell.store)
+                    .unwrap()
+                    .create("codex", &shell.workspace.project)
+                    .unwrap();
+                (cx.entity(), shell.mono_manager(), summary)
+            })
+            .unwrap();
+        let session = summary.id;
+        manager.update(cx, |_, cx| {
+            owner.update(cx, |shell, cx| {
+                shell.mono_install_app(summary, Default::default(), true, cx);
+                shell.sessions[&session].update(cx, |chat, _| chat.busy = true);
+            });
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.session_marks[&session].read(cx).state() == MarkState::Working);
+                assert!(shell.tab_marks[&session].read(cx).state() == MarkState::Working);
+                let copy = shell.tab_copy(session, cx);
+                assert!(matches!(
+                    copy.panes[copy.focus].mark,
+                    PaneMark::Project(_, true)
+                ));
+                shell.sessions[&session].update(cx, |chat, cx| chat.stop_if_busy(cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.session_marks[&session].read(cx).state() != MarkState::Working);
+                assert!(shell.tab_marks[&session].read(cx).state() != MarkState::Working);
+                let copy = shell.tab_copy(session, cx);
+                assert!(matches!(
+                    copy.panes[copy.focus].mark,
+                    PaneMark::Project(_, false)
+                ));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn mono_work_state_belongs_to_its_chat(cx: &mut TestAppContext) {
+        let (window, regular, _) = window(cx);
+        let mono = add_mono(window, cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let TitleTab::Mono { id, .. } = &mono else {
+                    panic!("Mono tab expected")
+                };
+                let manager = shell.monos.as_ref().unwrap().clone();
+                let chat = manager.read(cx).open_chat(id).unwrap();
+                shell.sessions[&regular].update(cx, |chat, _| chat.busy = true);
+                assert!(!manager.read(cx).chat_working(id, cx));
+                chat.update(cx, |chat, _| chat.busy = true);
+                assert!(manager.read(cx).chat_working(id, cx));
+                assert!(!manager.read(cx).chat_working("other-mono", cx));
+                chat.update(cx, |chat, cx| chat.stop_if_busy(cx));
+                assert!(!manager.read(cx).chat_working(id, cx));
+            })
+            .unwrap();
     }
 
     #[gpui::test]

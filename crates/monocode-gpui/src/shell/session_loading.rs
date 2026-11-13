@@ -19,6 +19,9 @@ impl Metadata<'_> {
     pub(super) fn responding(&self) -> bool {
         self.live.is_some_and(Conversation::responding)
     }
+    pub(super) fn icon_working(&self) -> bool {
+        self.live.map_or(self.busy, Conversation::responding)
+    }
     pub(super) fn has_saved_draft(&self) -> bool {
         self.live.map_or(self.draft, Conversation::has_saved_draft)
     }

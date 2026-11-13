@@ -120,8 +120,15 @@ impl Render for Runner {
         if let Some(result) = result {
             self.stepped = Some(tick);
             if let Ok(json) = result
-                && let Ok(frame) = serde_json::from_str(&json)
+                && let Ok(mut frame) = serde_json::from_str::<Frame>(&json)
             {
+                frame.rows = crate::monos::avatar::project_rows(
+                    self.name,
+                    self.busy
+                        && !reduced
+                        && crate::working_icon::talk_frame(tick as f32 * TICK_MS as f32 / 1000.),
+                )
+                .to_vec();
                 self.frame = frame;
             }
         }
@@ -215,6 +222,32 @@ impl Render for Runner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_frames_match_the_prompt_animation() {
+        let runtime = rquickjs::Runtime::new().unwrap();
+        let context = rquickjs::Context::full(&runtime).unwrap();
+        context.with(|cx| {
+            cx.eval::<(), _>(include_str!("../assets/settings-arcade.js"))
+                .unwrap();
+            let arcade: rquickjs::Object = cx.globals().get("NativeArcade").unwrap();
+            let runner: rquickjs::Function = arcade.get("runnerFrame").unwrap();
+            for name in monocode_core::project_appearance::MASCOTS {
+                for elapsed in [0., 180., 360., 540.] {
+                    let json: String = runner
+                        .call((elapsed, 600f32, true, "null", false, name))
+                        .unwrap();
+                    let frame: super::Frame = serde_json::from_str(&json).unwrap();
+                    assert_eq!(
+                        frame.rows,
+                        crate::monos::avatar::project_rows(
+                            name,
+                            crate::working_icon::talk_frame(elapsed as f32 / 1000.)
+                        )
+                    );
+                }
+            }
+        });
+    }
     #[test]
     fn original_runner_physics_deserialize_and_exit() {
         let runtime = rquickjs::Runtime::new().unwrap();

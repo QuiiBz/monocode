@@ -521,12 +521,11 @@ impl Monos {
             .flex()
             .items_center()
             .gap_2()
-            .child(avatar::avatar(
+            .child(crate::working_icon::WorkingIcon::mono(
                 &mono.mascot,
                 mono.color,
-                state,
+                self.chat_working(&mono.id, cx),
                 16.,
-                state == "idle",
             ))
             .child(
                 div()
@@ -570,6 +569,11 @@ impl Monos {
             .as_ref()
             .and_then(|id| self.chats.get(id))
             .cloned()
+    }
+    pub(crate) fn chat_working(&self, id: &str, cx: &App) -> bool {
+        self.chats
+            .get(id)
+            .is_some_and(|chat| chat.read(cx).responding())
     }
     /// A Mono's chat when it is open, without opening it.
     pub(crate) fn open_chat(&self, id: &str) -> Option<Entity<Conversation>> {
@@ -1393,7 +1397,12 @@ impl Monos {
                             .size(px(16.))
                             .relative()
                             .flex_shrink_0()
-                            .child(avatar::avatar(&mono.mascot, mono.color, state, 16., true))
+                            .child(crate::working_icon::WorkingIcon::mono(
+                                &mono.mascot,
+                                mono.color,
+                                self.chat_working(&mono.id, cx),
+                                16.,
+                            ))
                             .when(original, |d| {
                                 d.child(
                                     div()
@@ -1551,7 +1560,12 @@ impl Monos {
                         .child(crate::tab_tile::mark_tile(
                             &crate::tab_tile::TAB_TILE,
                             crate::tab_tile::Face::Neutral,
-                            avatar::avatar(&mono.mascot, mono.color, "idle", 14., true),
+                            crate::working_icon::WorkingIcon::mono(
+                                &mono.mascot,
+                                mono.color,
+                                self.chat_working(&mono.id, cx),
+                                14.,
+                            ),
                         ))
                         .child(
                             div()
