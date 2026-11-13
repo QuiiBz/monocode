@@ -1,6 +1,7 @@
 //! LiveAgentsPreview.tsx: the sidebar's card of working and unseen finished
 //! sessions, across every project.
 use super::*;
+use monocode_core::usage::elapsed_duration;
 
 const LIVE_AGENT_CAP: usize = 4;
 // Tailwind amber-400 and emerald-400.
@@ -19,32 +20,10 @@ struct LiveAgent {
     done: bool,
 }
 
-/// liveAgents.ts's formatLiveElapsed.
-fn live_elapsed(ms: u64) -> String {
-    let seconds = ((ms + 500) / 1000).max(1);
-    if seconds < 60 {
-        return format!("{seconds}s");
-    }
-    let (minutes, rest) = (seconds / 60, seconds % 60);
-    if minutes < 60 {
-        return if rest > 0 {
-            format!("{minutes}m {rest}s")
-        } else {
-            format!("{minutes}m")
-        };
-    }
-    let (hours, rest) = (minutes / 60, minutes % 60);
-    if rest > 0 {
-        format!("{hours}h {rest}m")
-    } else {
-        format!("{hours}h")
-    }
-}
-
-/// Milliseconds until `live_elapsed` shows something else for a run this old:
+/// Milliseconds until `elapsed_duration` shows something else for a run this old:
 /// labels count seconds for the first hour and minutes after that.
 fn next_label_change(ms: u64) -> u64 {
-    // live_elapsed rounds to the nearest second.
+    // elapsed_duration rounds to the nearest second.
     let shown = ms + 500;
     let step = if shown >= 3_600_000 { 60_000 } else { 1_000 };
     step - shown % step
@@ -267,11 +246,11 @@ impl Shell {
         let id = agent.id;
         let project = self.project_label(&agent.cwd);
         let elapsed = if agent.done {
-            agent.duration_ms.map(live_elapsed)
+            agent.duration_ms.map(elapsed_duration)
         } else {
             agent
                 .started_at
-                .map(|at| live_elapsed(now.saturating_sub(at)))
+                .map(|at| elapsed_duration(now.saturating_sub(at)))
         };
         let selected = self.selected_sessions.contains(&id)
             || (self.workspace.active == Some(id) && !self.mono_active(cx));
@@ -399,6 +378,28 @@ impl Shell {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext, WindowHandle};
+
+    #[test]
+    fn elapsed_labels_schedule_hour_and_minute_changes() {
+        for (milliseconds, delay) in [
+            (59 * 60_000, 500),
+            (3_599_499, 1),
+            (3_599_500, 60_000),
+            (60 * 60_000, 59_500),
+            (80 * 60_000, 59_500),
+            (205 * 60_000, 59_500),
+        ] {
+            assert_eq!(next_label_change(milliseconds), delay);
+            assert_eq!(
+                elapsed_duration(milliseconds + delay - 1),
+                elapsed_duration(milliseconds)
+            );
+            assert_ne!(
+                elapsed_duration(milliseconds + delay),
+                elapsed_duration(milliseconds)
+            );
+        }
+    }
 
     fn set_working(
         window: WindowHandle<Shell>,
