@@ -557,13 +557,13 @@ struct TabPane {
     mark: PaneMark,
 }
 enum PaneMark {
-    Project(String),
+    Project(String, bool),
     /// The provider, with the session id when its mark is lit.
     Session(String, Option<i64>),
     /// A file's name, or `None` for changes and commits.
     File(Option<String>),
     /// A Mono's mascot and colour.
-    Mono(String, u32),
+    Mono(String, u32, bool),
     /// A terminal pulled out of its dock.
     Terminal,
 }
@@ -1468,6 +1468,11 @@ impl Shell {
         self.observe_orchestration(&view, id, cx);
         self.observe_session_folders(&view, id, cx);
         self.sessions.insert(id, view);
+        // Mono app calls can install sessions while their manager is leased.
+        let owner = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = owner.update(cx, |shell, cx| shell.refresh_session_mark(id, cx));
+        });
         if !self.order.contains(&id) {
             self.order.push(id);
         }
@@ -1526,6 +1531,13 @@ impl Shell {
             state
         };
         let provider = session.summary.provider.clone();
+        let project = session.summary.cwd.clone();
+        let appearance = self.appearance(&project);
+        for mark in [self.session_marks[&id].clone(), self.tab_marks[&id].clone()] {
+            mark.update(cx, |mark, cx| {
+                mark.set_project(appearance.clone(), project.clone(), cx)
+            });
+        }
         self.session_marks[&id].update(cx, |mark, cx| mark.set(&provider, state, cx));
         self.tab_marks[&id].update(cx, |mark, cx| mark.set(&provider, tab_state, cx));
     }
@@ -6276,7 +6288,13 @@ impl Shell {
         let pinned = session.summary.pinned;
         let mark = {
             let mark = if !self.workspace.classic_layout {
-                self.focused_project_mark(&session.summary.cwd, side)
+                crate::working_icon::WorkingIcon::project(
+                    self.appearance(&session.summary.cwd),
+                    session.summary.cwd.clone(),
+                    session.icon_working(),
+                    side,
+                )
+                .into_any_element()
             } else {
                 match self.session_marks.get(&id) {
                     Some(mark) if self.sidebar_uncached() => div()
@@ -7349,7 +7367,7 @@ impl Shell {
                     mark: if self.workspace.classic_layout {
                         PaneMark::Session(session.summary.provider.clone(), lit.then_some(id))
                     } else {
-                        PaneMark::Project(session.summary.cwd.clone())
+                        PaneMark::Project(session.summary.cwd.clone(), session.icon_working())
                     },
                 });
             }
@@ -7378,7 +7396,13 @@ impl Shell {
     fn pane_mark(&self, mark: &PaneMark, active: bool) -> AnyElement {
         let ink = content(if active { 1. } else { 0.5 });
         let mark = match mark {
-            PaneMark::Project(project) => self.focused_project_mark(project, 14.),
+            PaneMark::Project(project, working) => crate::working_icon::WorkingIcon::project(
+                self.appearance(project),
+                project.clone(),
+                *working,
+                14.,
+            )
+            .into_any_element(),
             PaneMark::Session(provider, lit) => match lit.and_then(|id| self.tab_marks.get(&id)) {
                 Some(mark) => mark
                     .clone()
@@ -7393,10 +7417,10 @@ impl Shell {
             }
             PaneMark::File(None) => icon("git-compare", 14.).text_color(ink).into_any_element(),
             PaneMark::Terminal => icon("terminal", 14.).text_color(ink).into_any_element(),
-            PaneMark::Mono(mascot, color) => div()
+            PaneMark::Mono(mascot, color, working) => div()
                 .opacity(if active { 1. } else { 0.55 })
-                .child(crate::monos::avatar::avatar(
-                    mascot, *color, "idle", 14., true,
+                .child(crate::working_icon::WorkingIcon::mono(
+                    mascot, *color, *working, 14.,
                 ))
                 .into_any_element(),
         };
@@ -7536,7 +7560,14 @@ impl Shell {
                 let (face, mark) = self.pane_tile(&pane.mark, to[ix] == 0);
                 crate::tab_tile::StackTile {
                     face,
-                    mark,
+                    mark: div()
+                        .id(SharedString::from(format!(
+                            "pane-working-icon-{}",
+                            pane.key.0
+                        )))
+                        .size(px(14.))
+                        .child(mark)
+                        .into_any_element(),
                     from: from[ix],
                     to: to[ix],
                 }

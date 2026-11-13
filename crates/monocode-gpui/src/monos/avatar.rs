@@ -57,7 +57,7 @@ pub(crate) fn avatar(name: &str, color: u32, status: &str, side: f32, still: boo
             };
             let animate = moves && crate::pulse::request(rate, window, cx);
             let t = crate::pulse::elapsed(cx).as_secs_f32();
-            let talk = animate && status == "working" && (t * 3.).floor() as u64 % 2 == 1;
+            let talk = animate && status == "working" && crate::working_icon::talk_frame(t);
             let sprite = &SPRITES[index];
             let rows = if talk { &sprite.talk } else { &sprite.rest };
             let unit = bounds.size.width / 16.;
@@ -192,4 +192,12 @@ pub(crate) fn avatar(name: &str, color: u32, status: &str, side: f32, still: boo
     .size(px(side))
     .flex_shrink_0()
     .into_any_element()
+}
+
+pub(crate) fn project_rows(name: &str, talk: bool) -> &'static [String] {
+    let sprite = SPRITES
+        .iter()
+        .find(|sprite| sprite.name == name)
+        .unwrap_or(&SPRITES[0]);
+    if talk { &sprite.talk } else { &sprite.rest }
 }

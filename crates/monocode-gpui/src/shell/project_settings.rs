@@ -34,16 +34,6 @@ impl Shell {
     pub(super) fn project_mark(&self, path: &str, side: f32) -> AnyElement {
         project_icon(&self.appearance(path), path, side)
     }
-    pub(super) fn focused_project_mark(&self, project: &str, side: f32) -> AnyElement {
-        let appearance = self.appearance(project);
-        if project.starts_with("remote://") && appearance.logo.is_none() {
-            icon("internet", side)
-                .text_color(rgb(appearance.color(project)))
-                .into_any_element()
-        } else {
-            self.project_mark(project, side)
-        }
-    }
     pub(super) fn save_project_appearance(
         &mut self,
         path: String,

@@ -215,7 +215,8 @@ impl Shell {
     pub(super) fn mono_pane_mark(&self, pane: i64, cx: &App) -> Option<PaneMark> {
         let id = self.mono_pane_id(pane)?;
         let mono = self.monos.as_ref()?.read(cx).roster.get(id)?.clone();
-        Some(PaneMark::Mono(mono.mascot, mono.color))
+        let working = self.monos.as_ref()?.read(cx).chat_working(id, cx);
+        Some(PaneMark::Mono(mono.mascot, mono.color, working))
     }
 }
 

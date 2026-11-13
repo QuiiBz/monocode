@@ -60,6 +60,7 @@ pub(crate) struct SessionMark {
     side: f32,
     provider: String,
     state: State,
+    project: Option<(monocode_core::project_appearance::ProjectAppearance, String)>,
 }
 impl SessionMark {
     pub(crate) fn new(provider: String) -> Self {
@@ -67,6 +68,7 @@ impl SessionMark {
             side: 16.,
             provider,
             state: State::Idle,
+            project: None,
         }
     }
     /// A title tab's mark. Tabs paint inside their own cached frame, so they
@@ -76,6 +78,18 @@ impl SessionMark {
         Self {
             side: 14.,
             ..Self::new(provider)
+        }
+    }
+    pub(crate) fn set_project(
+        &mut self,
+        appearance: monocode_core::project_appearance::ProjectAppearance,
+        project: String,
+        cx: &mut Context<Self>,
+    ) {
+        let project = Some((appearance, project));
+        if self.project != project {
+            self.project = project;
+            cx.notify();
         }
     }
     #[cfg(test)]
@@ -101,11 +115,21 @@ impl Render for SessionMark {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let side = self.side;
         let mark: AnyElement = match self.state {
-            State::Idle => provider_icon(&self.provider, side).into_any_element(),
+            State::Idle => match &self.project {
+                Some((appearance, project)) => {
+                    crate::project_settings::project_icon(appearance, project, side)
+                }
+                None => provider_icon(&self.provider, side).into_any_element(),
+            },
             // Its own small view, so the clock repaints only the mark.
             State::Working => div()
                 .id("session-working")
-                .child(spinner("session-working-spinner", Rate::Smooth))
+                .child(match &self.project {
+                    Some((appearance, project)) => crate::project_settings::working_project_icon(
+                        appearance, project, side, true,
+                    ),
+                    None => spinner("session-working-spinner", Rate::Smooth).into_any_element(),
+                })
                 .role(Role::Image)
                 .aria_label("Working")
                 .into_any_element(),

@@ -90,7 +90,7 @@ fn mascot(index: usize, side: f32, color: gpui::Hsla) -> AnyElement {
 pub(crate) fn project_icon(appearance: &ProjectAppearance, project: &str, side: f32) -> AnyElement {
     if project.starts_with("remote://") && appearance.logo.is_none() {
         return icon("internet", side)
-            .text_color(content(0.7))
+            .text_color(rgb(appearance.color(project)))
             .into_any_element();
     }
     match &appearance.logo {
@@ -105,6 +105,60 @@ pub(crate) fn project_icon(appearance: &ProjectAppearance, project: &str, side: 
             rgb(appearance.color(project)).into(),
         ),
     }
+}
+pub(crate) fn working_project_icon(
+    appearance: &ProjectAppearance,
+    project: &str,
+    side: f32,
+    working: bool,
+) -> AnyElement {
+    if !working {
+        return project_icon(appearance, project, side);
+    }
+    if appearance.logo.is_some() || project.starts_with("remote://") {
+        let appearance = appearance.clone();
+        let project = project.to_owned();
+        return crate::pulse::looping(
+            "working-logo",
+            std::time::Duration::from_millis(360),
+            crate::pulse::Rate::Half,
+            move |phase| {
+                div()
+                    .size(px(side))
+                    .opacity(if phase < 0.5 { 1. } else { 0.65 })
+                    .child(project_icon(&appearance, &project, side))
+            },
+        )
+        .into_any_element();
+    }
+    let name = MASCOTS[appearance.mascot(project)];
+    let color = rgb(appearance.color(project));
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| {
+            let animate = crate::pulse::request(crate::pulse::Rate::Half, window, cx);
+            let talk =
+                animate && crate::working_icon::talk_frame(crate::pulse::elapsed(cx).as_secs_f32());
+            let rows = crate::monos::avatar::project_rows(name, talk);
+            let unit = bounds.size.width / 8.;
+            for (y, row) in rows.iter().enumerate() {
+                for (x, pixel) in row.bytes().enumerate() {
+                    if pixel == b'#' {
+                        window.paint_quad(gpui::fill(
+                            gpui::Bounds::new(
+                                bounds.origin + gpui::point(unit * x as f32, unit * y as f32),
+                                gpui::size(unit, unit),
+                            ),
+                            color,
+                        ));
+                    }
+                }
+            }
+        },
+    )
+    .size(px(side))
+    .flex_shrink_0()
+    .into_any_element()
 }
 /// Sidebar.tsx's CurrentProjectIcon: a 10px mascot inside a 20px tile.
 pub(crate) fn header_project_icon(appearance: &ProjectAppearance, project: &str) -> AnyElement {
