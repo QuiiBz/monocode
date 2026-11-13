@@ -107,14 +107,7 @@ fn work_title(model: Option<&str>, elapsed_ms: Option<u64>, live: bool) -> Strin
     let Some(ms) = elapsed_ms else {
         return if live { format!("{title}…") } else { title };
     };
-    let seconds = ms.saturating_add(500).saturating_div(1000).max(1);
-    let duration = if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds % 60 == 0 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}m {}s", seconds / 60, seconds % 60)
-    };
+    let duration = monocode_core::usage::elapsed_duration(ms);
     format!("{title} for {duration}")
 }
 
@@ -6507,6 +6500,19 @@ mod scroll_tests {
                 if crate::markdown::selection_text(md).contains("Updated while hidden.")))
             );
         });
+    }
+
+    #[test]
+    fn work_titles_use_hours_for_live_and_saved_turns() {
+        for live in [true, false] {
+            let verb = if live { "working" } else { "worked" };
+            for (minutes, duration) in [(59, "59m"), (60, "1h"), (80, "1h 20m"), (205, "3h 25m")] {
+                assert_eq!(
+                    work_title(Some("Model"), Some(minutes * 60_000), live),
+                    format!("Model {verb} for {duration}")
+                );
+            }
+        }
     }
 
     #[test]

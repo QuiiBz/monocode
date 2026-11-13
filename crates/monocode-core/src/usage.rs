@@ -632,3 +632,52 @@ mod tests {
         assert_eq!(w.countdown(0), "5h");
     }
 }
+
+pub fn elapsed_duration(ms: u64) -> String {
+    let seconds = (ms.saturating_add(500) / 1000).max(1);
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let (minutes, rest) = (seconds / 60, seconds % 60);
+    if minutes < 60 {
+        return if rest > 0 {
+            format!("{minutes}m {rest}s")
+        } else {
+            format!("{minutes}m")
+        };
+    }
+    let (hours, rest) = (minutes / 60, minutes % 60);
+    if rest > 0 {
+        format!("{hours}h {rest}m")
+    } else {
+        format!("{hours}h")
+    }
+}
+
+#[cfg(test)]
+mod elapsed_duration_tests {
+    use super::elapsed_duration;
+
+    #[test]
+    fn elapsed_duration_uses_hours_and_preserves_rounding() {
+        for (milliseconds, expected) in [
+            (0, "1s"),
+            (1499, "1s"),
+            (1500, "2s"),
+            (59_499, "59s"),
+            (59_500, "1m"),
+            (61_000, "1m 1s"),
+            (59 * 60_000, "59m"),
+            (3_599_499, "59m 59s"),
+            (3_599_500, "1h"),
+            (60 * 60_000, "1h"),
+            (80 * 60_000, "1h 20m"),
+            (180 * 60_000, "3h"),
+            (205 * 60_000, "3h 25m"),
+            (25 * 3_600_000, "25h"),
+            (u64::MAX, "5124095576030h 25m"),
+        ] {
+            assert_eq!(elapsed_duration(milliseconds), expected, "{milliseconds}");
+        }
+    }
+}
