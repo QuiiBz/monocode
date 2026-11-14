@@ -1674,7 +1674,7 @@ impl Monos {
                 summary: view.summary.clone(),
                 body: view.notification_reply_body(cx),
                 habit: true,
-                was_cancelled: view.notification_was_cancelled(),
+                succeeded: view.notification_succeeded() && view.notification_has_reply(cx),
             }
         };
         cx.emit(completion);

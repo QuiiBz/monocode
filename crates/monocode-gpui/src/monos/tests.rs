@@ -2954,3 +2954,65 @@ fn focused_rail_includes_other_projects_and_unassigned_monos(cx: &mut TestAppCon
         assert!(!manager.rail_ids.contains(&"unassigned".to_owned()));
     });
 }
+
+#[gpui::test]
+fn root_reply_dispatches_one_sound_through_mono_events(cx: &mut TestAppContext) {
+    let setup = setup(cx);
+    setup
+        .window
+        .update(cx, |shell, _, _| {
+            shell.workspace.preferences.notifications = false;
+            shell.workspace.preferences.sounds = true;
+        })
+        .unwrap();
+    cx.update(|_| crate::sound::PLAYED.with_borrow_mut(Vec::clear));
+    setup.manager.update(cx, |manager, cx| {
+        let chat = manager.chats[&setup.id].clone();
+        manager.inflight.insert(
+            setup.id.clone(),
+            Message {
+                id: "sound-test".into(),
+                text: "Test".into(),
+                internal: false,
+                sent_at: None,
+                error: None,
+                attachments: Vec::new(),
+            },
+        );
+        chat.update(cx, |chat, cx| {
+            chat.notification_test_turn(false, true, false);
+            chat.transcript.update(cx, |transcript, cx| {
+                transcript.streaming(true, cx);
+                let start = transcript.source_rows().len();
+                transcript.patch(
+                    start,
+                    vec![
+                        monocode_core::transcript::Row {
+                            role: "user".into(),
+                            text: "Test".into(),
+                            first: true,
+                            sent_at: None,
+                        },
+                        monocode_core::transcript::Row {
+                            role: "assistant".into(),
+                            text: "Done".into(),
+                            first: true,
+                            sent_at: None,
+                        },
+                    ],
+                    cx,
+                );
+                transcript.streaming(false, cx);
+            });
+            assert!(chat.notification_succeeded());
+            assert!(chat.notification_has_reply(cx));
+            cx.emit(SessionChanged);
+            cx.emit(SessionChanged);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|_| {
+        crate::sound::PLAYED
+            .with_borrow(|played| assert_eq!(played.as_slice(), &[crate::sound::Cue::Finished]));
+    });
+}

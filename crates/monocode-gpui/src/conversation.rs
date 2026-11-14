@@ -180,6 +180,7 @@ pub(crate) struct Conversation {
     /// The UI is idle; serialize the next launch behind the worker's last save.
     stopping: bool,
     notification_cancelled: bool,
+    notification_manual_turn: bool,
     /// The store's saved-draft flag, until the conversation loads its own.
     pub(crate) draft_hint: bool,
     /// The provider model for the next turn; `None` uses its configured default.
@@ -625,6 +626,7 @@ impl Conversation {
             busy: false,
             stopping: false,
             notification_cancelled: false,
+            notification_manual_turn: false,
             draft_hint: false,
             model: std::env::var(format!(
                 "MONOCODE_{}_MODEL",
@@ -848,7 +850,7 @@ impl Conversation {
         cx: &mut Context<Self>,
     ) {
         if self.editing_last_turn.pending() {
-            self.defer_edit_transfer(settings, Some(prompt), cx);
+            self.defer_edit_transfer(settings, Some(prompt), false, cx);
             return;
         }
         if self.needs_history_restore() || self.stopping {
@@ -856,7 +858,7 @@ impl Conversation {
                 move |this, cx| {
                     if this.preserve_new_composer(cx) {
                         this.install_transfer(settings, None, cx);
-                        this.enqueue_restored_prompt(prompt, cx);
+                        this.enqueue_restored_prompt(prompt, false, cx);
                     } else {
                         this.quick_submit(prompt, settings, cx);
                     }
@@ -878,11 +880,17 @@ impl Conversation {
     /// `invert` sends a mid-turn message the opposite way from the follow-up
     /// preference: queued when it steers, steering when it queues.
     fn send_follow_up(&mut self, invert: bool, cx: &mut Context<Self>) {
+        self.send_with_origin(invert, false, cx);
+    }
+    fn send_with_origin(&mut self, invert: bool, programmatic: bool, cx: &mut Context<Self>) {
         if self.is_remote() && self.remote_send_guard(cx) {
             return;
         }
         if self.needs_history_restore() {
-            self.defer_history_action(move |this, cx| this.send_follow_up(invert, cx), cx);
+            self.defer_history_action(
+                move |this, cx| this.send_with_origin(invert, programmatic, cx),
+                cx,
+            );
             return;
         }
         if self.submit_edited(cx) {
@@ -965,7 +973,13 @@ impl Conversation {
             self.stop(cx);
         }
         if self.sends_as_follow_up() {
-            self.enqueue_follow_up_inverted(prompt, mode.map(str::to_owned), invert, cx);
+            self.enqueue_follow_up_with_origin(
+                prompt,
+                mode.map(str::to_owned),
+                invert,
+                programmatic,
+                cx,
+            );
             if self.stopping || self.settings.pending_provider_switch.is_some() {
                 // A fresh Send continues the conversation, while older queued
                 // messages remain paused after Stop.
@@ -991,6 +1005,7 @@ impl Conversation {
         self.orchestration_plan = None;
         self.orchestration_error = None;
         self.launch_prompt(prompt, cx);
+        self.notification_manual_turn = !programmatic;
         if self.busy && mode.is_some() {
             self.clear_submitted_mode(cx);
         }
@@ -1428,6 +1443,9 @@ impl Conversation {
                                         cx.notify();
                                         return;
                                     }
+                                    if reply.answers.is_some() {
+                                        this.notification_manual_turn = true;
+                                    }
                                     if let Some((card, _)) = this.questions.pop_front() {
                                         this.question_overlay.release(card, cx);
                                     }
@@ -1565,6 +1583,7 @@ impl Conversation {
         self.busy = true;
         self.stopping = false;
         self.notification_cancelled = false;
+        self.notification_manual_turn = false;
         self.review
             .update(cx, |review, cx| review.set_busy(true, cx));
         self.follow_ups.ready = false;
@@ -1592,8 +1611,17 @@ impl Conversation {
         prompt: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.install_transfer_with_origin(settings, prompt, true, cx);
+    }
+    fn install_transfer_with_origin(
+        &mut self,
+        settings: Settings,
+        prompt: Option<String>,
+        programmatic: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.editing_last_turn.pending() {
-            self.defer_edit_transfer(settings, prompt, cx);
+            self.defer_edit_transfer(settings, prompt, programmatic, cx);
             return;
         }
         if self.needs_history_restore() || self.stopping {
@@ -1611,9 +1639,11 @@ impl Conversation {
                     match prompt {
                         Some(prompt) if this.preserve_new_composer(cx) => {
                             this.install_transfer(settings, None, cx);
-                            this.enqueue_restored_prompt(prompt, cx);
+                            this.enqueue_restored_prompt(prompt, programmatic, cx);
                         }
-                        prompt => this.install_transfer(settings, prompt, cx),
+                        prompt => {
+                            this.install_transfer_with_origin(settings, prompt, programmatic, cx)
+                        }
                     }
                 },
                 cx,
@@ -1629,7 +1659,7 @@ impl Conversation {
         self.refresh_git(cx);
         if let Some(prompt) = prompt {
             self.input.update(cx, |i, cx| i.set_text(prompt, cx));
-            self.send(cx);
+            self.send_with_origin(false, programmatic, cx);
         } else {
             cx.notify();
         }

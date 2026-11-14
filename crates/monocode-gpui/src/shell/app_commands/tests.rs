@@ -660,6 +660,7 @@ fn app_launch_submission_uses_the_saved_message_identity(cx: &mut TestAppContext
             assert!(state.draft.is_none());
             assert_eq!(state.messages.len(), 1);
             assert_eq!(state.messages[0].id, expected);
+            assert!(state.messages[0].programmatic);
             assert_eq!(state.messages[0].text, "Review this project");
             shell.sessions[&child].update(cx, |v, _| v.busy = false);
         })

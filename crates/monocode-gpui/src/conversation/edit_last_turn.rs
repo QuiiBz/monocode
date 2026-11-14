@@ -37,15 +37,16 @@ impl Conversation {
         &mut self,
         settings: Settings,
         prompt: Option<String>,
+        programmatic: bool,
         cx: &mut Context<Self>,
     ) {
         self.history_actions.push_back(Box::new(move |this, cx| {
             if let Some(prompt) = prompt {
                 if this.preserve_new_composer(cx) {
                     this.install_transfer(settings, None, cx);
-                    this.enqueue_restored_prompt(prompt, cx);
+                    this.enqueue_restored_prompt(prompt, programmatic, cx);
                 } else {
-                    this.install_transfer(settings, Some(prompt), cx);
+                    this.install_transfer_with_origin(settings, Some(prompt), programmatic, cx);
                 }
             } else {
                 this.install_transfer(settings, None, cx);

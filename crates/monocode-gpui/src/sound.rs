@@ -1,12 +1,18 @@
 //! Cuelume's success/arrival recipes used by React, rendered as quiet PCM cues.
 //! Recipe attribution: Daniel Belyi, cuelume (MIT); see NOTICE.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cue {
     Finished,
     Input,
     LinkedActivity,
 }
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PLAYED: std::cell::RefCell<Vec<Cue>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 pub(crate) fn play(cue: Cue) {
+    #[cfg(test)]
+    PLAYED.with_borrow_mut(|played| played.push(cue));
     #[cfg(all(target_os = "macos", not(test)))]
     std::thread::spawn(move || {
         let directory = crate::data_dir().join("sounds");

@@ -31,7 +31,12 @@ impl Conversation {
         self.settings.mono.is_none()
             && (!self.input.read(cx).content.is_empty() || !self.attachments.is_empty())
     }
-    pub(super) fn enqueue_restored_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
+    pub(super) fn enqueue_restored_prompt(
+        &mut self,
+        prompt: String,
+        programmatic: bool,
+        cx: &mut Context<Self>,
+    ) {
         // The accepted prompt predates this composer draft. Queue it without
         // taking any files the user attached while history was restoring.
         let attachments = std::mem::take(&mut self.attachments);
@@ -45,7 +50,13 @@ impl Conversation {
         } else {
             None
         };
-        self.enqueue_follow_up(prompt, mode.map(str::to_owned), cx);
+        self.enqueue_follow_up_with_origin(
+            prompt,
+            mode.map(str::to_owned),
+            false,
+            programmatic,
+            cx,
+        );
         self.attachments = attachments;
     }
     pub(crate) fn history_loaded(&self) -> bool {
@@ -308,7 +319,7 @@ mod tests {
             chat.follow_ups.state.paused = true;
             chat.attachments.push("/tmp/new-composer-image.png".into());
             assert!(chat.preserve_new_composer(cx));
-            chat.enqueue_restored_prompt("Accepted before restore".into(), cx);
+            chat.enqueue_restored_prompt("Accepted before restore".into(), false, cx);
             assert_eq!(chat.input.read(cx).content, "Unsent draft");
             assert_eq!(
                 chat.attachments,
@@ -318,8 +329,50 @@ mod tests {
                 chat.follow_ups.state.messages[0].text,
                 "Accepted before restore"
             );
+            assert!(!chat.follow_ups.state.messages[0].programmatic);
             assert!(chat.follow_ups.state.messages[0].attachments.is_empty());
         });
+    }
+
+    #[gpui::test]
+    fn deferred_transfers_keep_submission_origin(cx: &mut TestAppContext) {
+        for programmatic in [false, true] {
+            for editing in [false, true] {
+                let store = Store::open(Path::new(":memory:")).unwrap();
+                let session = store.create("codex", "/project").unwrap();
+                let chat = cx.new(|cx| Conversation::new(session, Arc::new(Mutex::new(store)), cx));
+                chat.update(cx, |chat, cx| {
+                    chat.loaded = true;
+                    chat.summary.provider = "fixture".into();
+                    chat.follow_ups.state.paused = true;
+                    chat.input.update(cx, |input, cx| {
+                        input.set_text("New composer draft".into(), cx)
+                    });
+                    let settings = chat.settings.clone();
+                    if editing {
+                        chat.defer_edit_transfer(
+                            settings,
+                            Some("Accepted prompt".into()),
+                            programmatic,
+                            cx,
+                        );
+                    } else {
+                        chat.stopping = true;
+                        chat.install_transfer_with_origin(
+                            settings,
+                            Some("Accepted prompt".into()),
+                            programmatic,
+                            cx,
+                        );
+                        chat.stopping = false;
+                    }
+                    chat.run_history_actions(cx);
+                    assert_eq!(chat.input.read(cx).content, "New composer draft");
+                    assert_eq!(chat.follow_ups.state.messages.len(), 1);
+                    assert_eq!(chat.follow_ups.state.messages[0].programmatic, programmatic);
+                });
+            }
+        }
     }
 
     #[gpui::test]
@@ -338,7 +391,7 @@ mod tests {
             chat.settings
                 .attachments
                 .push("/tmp/accepted-prompt.png".into());
-            chat.enqueue_restored_prompt("Accepted prompt".into(), cx);
+            chat.enqueue_restored_prompt("Accepted prompt".into(), true, cx);
             assert_eq!(chat.input.read(cx).content, "New draft");
             assert_eq!(
                 chat.attachments,
@@ -347,6 +400,7 @@ mod tests {
             assert!(chat.settings.attachments.is_empty());
             let queued = &chat.follow_ups.state.messages[0];
             assert_eq!(queued.text, "Accepted prompt");
+            assert!(queued.programmatic);
             assert_eq!(
                 queued.attachments,
                 vec![std::path::PathBuf::from("/tmp/accepted-prompt.png")]

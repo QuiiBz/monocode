@@ -58,7 +58,7 @@ impl Conversation {
         }
         self.install_transfer(settings, None, cx);
         if send {
-            self.draft_action(true, cx);
+            self.draft_action_with_origin(true, true, cx);
         }
         cx.emit(SessionChanged);
     }
