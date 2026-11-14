@@ -1479,7 +1479,10 @@ impl Shell {
         // Mono app calls can install sessions while their manager is leased.
         let owner = cx.weak_entity();
         cx.defer(move |cx| {
-            let _ = owner.update(cx, |shell, cx| shell.refresh_session_mark(id, cx));
+            let _ = owner.update(cx, |shell, cx| {
+                shell.refresh_session_mark(id, cx);
+                shell.sync_search_session(id, cx);
+            });
         });
         if !self.order.contains(&id) {
             self.order.push(id);

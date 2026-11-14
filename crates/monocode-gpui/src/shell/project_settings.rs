@@ -48,6 +48,11 @@ impl Shell {
                 });
             }
         }
+        if let Some(search) = &self.app_search {
+            search.view.update(cx, |search, cx| {
+                search.set_project_appearance(path.clone(), appearance.clone(), cx)
+            });
+        }
         self.workspace.project_appearance.insert(path, appearance);
         self.invalidate_chrome(cx);
         self.persist(cx);

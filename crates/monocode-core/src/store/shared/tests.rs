@@ -1258,3 +1258,201 @@ fn a_steer_with_an_earlier_turns_start_still_joins_the_running_turn() {
     assert_eq!(turns[&5].joined_turn, Some(3));
     assert_eq!(turns[&5].started_at, None);
 }
+
+#[test]
+fn search_projects_current_mono_roots_without_listing_hidden_workers() {
+    use crate::{
+        mono::{Mono, Roster},
+        search::{Scope, Target},
+        transcript::Row,
+    };
+    use std::sync::{atomic::AtomicBool, Arc};
+    for hidden in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("search.db");
+        let store = Store::open_monocode(&path).unwrap();
+        let root = store.create("codex", "/Users/tom").unwrap();
+        let worker = store.create("codex", "/assigned").unwrap();
+        let other_hidden = store.create("codex", "/assigned").unwrap();
+        store.title(root.id, "MonoInvader").unwrap();
+        for (session, sidebar_hidden) in [
+            (root.id, hidden),
+            (worker.id, false),
+            (other_hidden.id, true),
+        ] {
+            store
+                .shared_patch(
+                    session,
+                    &[
+                        ("sidebar_hidden", json!(sidebar_hidden)),
+                        ("has_user_message", json!(true)),
+                    ],
+                )
+                .unwrap();
+            store
+                .shared_store_blocks(
+                    session,
+                    &[json!({"id":"user", "role":"user", "text":"needle saved history"})],
+                )
+                .unwrap();
+        }
+        store.conn.execute_batch("CREATE TABLE orchestration_workers(session_id TEXT PRIMARY KEY, lead_id TEXT NOT NULL)").unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO orchestration_workers VALUES(?1,?2)",
+                params![
+                    store.persisted_session_id(worker.id).unwrap(),
+                    store.persisted_session_id(root.id).unwrap()
+                ],
+            )
+            .unwrap();
+        let mut roster = Roster::default();
+        roster.monos.push(Mono {
+            name: "Chief".into(),
+            session_id: Some(root.id),
+            projects: vec!["/assigned".into()],
+            ..Default::default()
+        });
+        roster.hidden_sessions = vec![root.id, worker.id];
+        roster.save(&store).unwrap();
+        let sidebar = store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.id)
+            .collect::<Vec<_>>();
+        let summaries = store.search_summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, root.id);
+        assert_eq!(summaries[0].title, "Chief");
+        assert_eq!(summaries[0].cwd, "/Users/tom");
+        let reader = store.search_reader().unwrap().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (names, _) = reader.search_sessions("Chief", cancel.clone()).unwrap();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|hit| hit.target == Target::Conversation(root.id))
+                .count(),
+            1
+        );
+        let (saved, _) = reader.search_sessions("needle", cancel.clone()).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(matches!(saved[0].target, Target::Message { session, .. } if session == root.id));
+        let live = crate::search::messages(
+            &summaries[0],
+            &[Row {
+                role: "user".into(),
+                text: "needle saved history".into(),
+                first: true,
+                sent_at: None,
+            }],
+            "needle",
+            &cancel,
+        );
+        assert_eq!(
+            crate::search::grouped(saved.into_iter().chain(live), Scope::Conversations).len(),
+            1
+        );
+        assert_eq!(
+            store
+                .sessions()
+                .unwrap()
+                .into_iter()
+                .map(|summary| summary.id)
+                .collect::<Vec<_>>(),
+            sidebar
+        );
+    }
+}
+
+#[test]
+fn saved_search_keeps_local_and_mono_history_with_remote_results() {
+    use crate::{
+        mono::{Mono, Roster},
+        search::{Scope, Target},
+        transcript::Row,
+    };
+    use std::sync::{atomic::AtomicBool, Arc};
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open_monocode(&directory.path().join("mixed-search.db")).unwrap();
+    let local = store.create("codex", "/local").unwrap();
+    let root = store.create("codex", "/Users/tom").unwrap();
+    store.title(local.id, "Needle local").unwrap();
+    store.title(root.id, "MonoInvader").unwrap();
+    for session in [local.id, root.id] {
+        store
+            .shared_patch(session, &[("has_user_message", json!(true))])
+            .unwrap();
+        store
+            .shared_store_blocks(
+                session,
+                &[json!({"id":"user", "role":"user", "text":"needle saved message"})],
+            )
+            .unwrap();
+    }
+    store
+        .shared_patch(root.id, &[("sidebar_hidden", json!(true))])
+        .unwrap();
+    let mut roster = Roster::default();
+    roster.monos.push(Mono {
+        name: "Needle Chief".into(),
+        session_id: Some(root.id),
+        projects: vec!["/assigned".into()],
+        ..Default::default()
+    });
+    roster.hidden_sessions.push(root.id);
+    roster.save(&store).unwrap();
+    let project = store
+        .remember_remote_project(
+            "search-machine",
+            &json!({"id":"remote-project", "cwd":"/remote"}),
+        )
+        .unwrap();
+    let remote = store.register_remote_summary(&project, &json!({
+        "id":"remote-chat", "title":"Needle remote", "harness":"codex", "hasUserMessage":true,
+        "blocks":[{"id":"remote-user", "role":"user", "text":"needle remote message"}]
+    })).unwrap();
+    assert!(remote.has_messages);
+    let reader = store.search_reader().unwrap().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (saved, truncated) = reader.search_sessions("needle", cancel.clone()).unwrap();
+    assert!(!truncated);
+    for session in [local.id, root.id, remote.id] {
+        assert_eq!(
+            saved
+                .iter()
+                .filter(|hit| hit.target == Target::Conversation(session))
+                .count(),
+            1
+        );
+    }
+    for session in [local.id, root.id] {
+        assert_eq!(saved.iter().filter(|hit| matches!(hit.target, Target::Message { session: target, .. } if target == session)).count(), 1);
+    }
+    let summaries = reader.search_summaries().unwrap();
+    let live = summaries.iter().flat_map(|summary| {
+        crate::search::messages(
+            summary,
+            &[Row {
+                role: "user".into(),
+                text: "needle live message".into(),
+                first: true,
+                sent_at: None,
+            }],
+            "needle",
+            &cancel,
+        )
+    });
+    let merged = crate::search::grouped(saved.into_iter().chain(live), Scope::Conversations);
+    assert_eq!(merged.len(), 6);
+    for session in [local.id, root.id, remote.id] {
+        assert_eq!(merged.iter().filter(|hit| matches!(hit.target, Target::Message { session: target, .. } if target == session)).count(), 1);
+    }
+    assert!(!store
+        .sessions()
+        .unwrap()
+        .iter()
+        .any(|summary| summary.id == root.id));
+}

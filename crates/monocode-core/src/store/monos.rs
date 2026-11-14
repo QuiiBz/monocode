@@ -2,6 +2,27 @@ use super::{Session, Store};
 use rusqlite::OptionalExtension;
 
 impl Store {
+    pub fn search_summaries(&self) -> Result<Vec<Session>, String> {
+        let roster = crate::mono::Roster::load(self)?;
+        let mut summaries = self.sessions()?;
+        summaries.retain(|summary| !roster.hidden_sessions.contains(&summary.id));
+        for mono in roster.monos {
+            let Some(session) = mono.session_id else {
+                continue;
+            };
+            let Some(mut summary) = self.mono_session(session)? else {
+                continue;
+            };
+            summary.title = mono.label();
+            if let Some(existing) = summaries.iter_mut().find(|existing| existing.id == session) {
+                *existing = summary;
+            } else {
+                summaries.push(summary);
+            }
+        }
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+        Ok(summaries)
+    }
     /// Look up an existing Mono conversation independently of the sidebar.
     /// Hidden sessions are valid conversations and must never be replaced.
     pub fn mono_session(&self, id: i64) -> Result<Option<Session>, String> {

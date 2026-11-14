@@ -200,6 +200,27 @@ impl Shell {
         }
         self.navigation_revision += 1;
         let restore = window.focused(cx);
+        let (mono_roots, root_summaries) = self
+            .monos
+            .as_ref()
+            .and_then(|monos| monos.read(cx).search_sources().ok())
+            .unwrap_or_default();
+        let mut summaries: HashMap<_, _> = locked(&self.store)
+            .and_then(|store| store.search_summaries())
+            .unwrap_or_else(|_| {
+                self.order
+                    .iter()
+                    .map(|&id| self.session_metadata(id, cx).summary.clone())
+                    .collect()
+            })
+            .into_iter()
+            .map(|summary| (summary.id, summary))
+            .collect();
+        summaries.extend(
+            root_summaries
+                .into_iter()
+                .map(|summary| (summary.id, summary)),
+        );
         let conversations = self
             .sessions
             .values()
@@ -207,20 +228,15 @@ impl Shell {
             .chain(
                 self.monos
                     .as_ref()
-                    .map(|m| m.read(cx).search_conversations())
+                    .map(|monos| monos.read(cx).search_conversations())
                     .unwrap_or_default(),
             )
+            .filter(|conversation| summaries.contains_key(&conversation.read(cx).summary.id))
             .collect::<Vec<_>>();
-        let mut summaries: HashMap<_, _> = self
-            .order
-            .iter()
-            .map(|&id| (id, self.session_metadata(id, cx).summary.clone()))
-            .collect();
-        summaries.extend(
-            conversations
-                .iter()
-                .map(|s| (s.read(cx).summary.id, s.read(cx).summary.clone())),
-        );
+        for conversation in &conversations {
+            let summary = conversation.read(cx).summary.clone();
+            summaries.insert(summary.id, summary);
+        }
         let summaries = summaries.into_values().collect();
         let live = conversations
             .iter()
@@ -250,6 +266,8 @@ impl Shell {
                 store,
                 Sources {
                     summaries,
+                    conversations,
+                    mono_roots,
                     live,
                     projects,
                     recent,
@@ -269,6 +287,23 @@ impl Shell {
             |this, _, event: &Event, window, cx| match event {
                 Event::Close => this.close_app_search(window, cx),
                 Event::Open(target, query) => {
+                    let session = match target {
+                        Target::Conversation(session) | Target::Message { session, .. } => {
+                            Some(*session)
+                        }
+                        _ => None,
+                    };
+                    if let Some(session) = session
+                        && let Some(monos) = &this.monos
+                        && let Err(error) = monos.read(cx).search_session_access(session)
+                    {
+                        if let Some(search) = &this.app_search {
+                            search
+                                .view
+                                .update(cx, |search, cx| search.set_navigation_error(error, cx));
+                        }
+                        return;
+                    }
                     let panel = this.app_search.as_ref().is_some_and(|search| search.panel);
                     this.close_app_search(window, cx);
                     match target {
@@ -344,23 +379,30 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(monos) = &self.monos {
+            match monos.update(cx, |monos, cx| {
+                monos.open_search_session(id, jump.clone(), window, cx)
+            }) {
+                Ok(true) => {
+                    if panel {
+                        self.clear_saved_search_query();
+                    }
+                    return;
+                }
+                Err(error) => {
+                    self.error = Some(error);
+                    cx.notify();
+                    return;
+                }
+                Ok(false) => {}
+            }
+        }
         if let Some(view) = self.ensure_session(id, cx) {
             self.open(id, window, cx);
             if let Some((row, query)) = jump {
                 view.update(cx, |v, cx| v.reveal_search(row, query, cx));
             }
             if panel && self.workspace.active == Some(id) {
-                self.clear_saved_search_query();
-            }
-            return;
-        }
-        if let Some(monos) = &self.monos
-            && let Some(view) = monos.update(cx, |m, cx| m.open_search_session(id, window, cx))
-        {
-            if let Some((row, query)) = jump {
-                view.update(cx, |v, cx| v.reveal_search(row, query, cx));
-            }
-            if panel {
                 self.clear_saved_search_query();
             }
             return;
@@ -404,12 +446,29 @@ impl Shell {
         let Some(search) = &self.app_search else {
             return;
         };
+        if let Some(monos) = &self.monos
+            && let Ok((roots, summaries)) = monos.read(cx).search_sources()
+        {
+            search
+                .view
+                .update(cx, |search, cx| search.set_mono_roots(roots, summaries, cx));
+        }
         let views = self
             .monos
             .as_ref()
             .map(|m| m.read(cx).search_conversations())
             .unwrap_or_default();
         for view in views {
+            if !search
+                .view
+                .read(cx)
+                .contains_session(view.read(cx).summary.id)
+            {
+                continue;
+            }
+            search
+                .view
+                .update(cx, |search, cx| search.watch_conversation(&view, cx));
             let transcript = view.read(cx).transcript.read(cx);
             if !transcript.history_complete() {
                 continue;
@@ -425,9 +484,19 @@ impl Shell {
         let Some(search) = &self.app_search else {
             return;
         };
+        if !search.view.read(cx).contains_session(id)
+            && !locked(&self.store)
+                .and_then(|store| store.search_summaries())
+                .is_ok_and(|summaries| summaries.iter().any(|summary| summary.id == id))
+        {
+            return;
+        }
         let Some(session) = self.sessions.get(&id) else {
             return;
         };
+        search
+            .view
+            .update(cx, |search, cx| search.watch_conversation(session, cx));
         let session = session.read(cx);
         let transcript = session.transcript.read(cx);
         if !transcript.history_complete() {
@@ -446,6 +515,153 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use monocode_core::search::Scope;
+    #[gpui::test]
+    fn search_preserves_disabled_mono_results_and_opens_enabled_roots(cx: &mut TestAppContext) {
+        use monocode_core::{
+            mono::{Mono, Roster},
+            store::Store,
+            transcript::Row,
+        };
+        use std::{sync::Mutex, time::Duration};
+        cx.update(|cx| {
+            input::bind(cx);
+            super::super::bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        for (query, panel) in [
+            ("Chief", true),
+            ("needle", true),
+            ("Chief", false),
+            ("needle", false),
+        ] {
+            let mut store = Store::open(std::path::Path::new(":memory:")).unwrap();
+            let root = store.create("codex", "/Users/tom").unwrap();
+            store.title(root.id, "MonoInvader").unwrap();
+            store
+                .write_rows(
+                    root.id,
+                    0,
+                    &[Row {
+                        role: "user".into(),
+                        text: "needle saved history".into(),
+                        first: true,
+                        sent_at: None,
+                    }],
+                )
+                .unwrap();
+            let mut roster = Roster::default();
+            roster.monos.push(Mono {
+                id: "search-root".into(),
+                name: "Chief".into(),
+                session_id: Some(root.id),
+                projects: vec!["/assigned".into()],
+                ..Default::default()
+            });
+            roster.hidden_sessions.push(root.id);
+            roster.save(&store).unwrap();
+            let summaries = store.sessions().unwrap();
+            let database = Arc::new(Mutex::new(store));
+            let window = cx.update(|cx| {
+                cx.open_window(Default::default(), |_, cx| {
+                    cx.new(|cx| Shell::new(database, summaries, "/assigned".into(), None, cx))
+                })
+                .unwrap()
+            });
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, window, cx| {
+                    assert!(
+                        shell
+                            .mono_manager()
+                            .read(cx)
+                            .open_chat("search-root")
+                            .is_none()
+                    );
+                    assert!(!shell.sessions.contains_key(&root.id));
+                    shell.workspace.preferences.search_panel = panel;
+                    shell.open_app_search(window, cx);
+                    shell
+                        .app_search
+                        .as_ref()
+                        .unwrap()
+                        .view
+                        .update(cx, |search, cx| {
+                            search.restore_draft((query.into(), Scope::Conversations), cx)
+                        });
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(200));
+            cx.run_until_parked();
+            let search_view = window
+                .update(cx, |shell, window, cx| {
+                    shell.workspace.preferences.monos = false;
+                    let preferences = shell.workspace.preferences.clone();
+                    let manager = shell.mono_manager();
+                    manager.update(cx, |manager, cx| {
+                        manager.set_preferences(preferences, cx);
+                        assert!(
+                            manager
+                                .open_search_session(root.id, None, window, cx)
+                                .is_err()
+                        );
+                    });
+                    shell.app_search.as_ref().unwrap().view.clone()
+                })
+                .unwrap();
+            cx.run_until_parked();
+            cx.simulate_keystrokes(window.into(), "enter");
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, window, cx| {
+                    let search = shell.app_search.as_ref().unwrap();
+                    assert_eq!(search.view.entity_id(), search_view.entity_id());
+                    assert_eq!(
+                        search.view.read(cx).draft(cx),
+                        (query.into(), Scope::Conversations)
+                    );
+                    assert!(search.view.focus_handle(cx).is_focused(window));
+                    assert!(shell.saved_search.is_none());
+                    assert!(!shell.workspace.preferences.monos);
+                    let manager = shell.mono_manager();
+                    assert!(manager.read(cx).current().is_none());
+                    assert!(manager.read(cx).open_chat("search-root").is_none());
+                    assert!(!shell.sessions.contains_key(&root.id));
+                })
+                .unwrap();
+            let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+            visual.run_until_parked();
+            assert!(visual.debug_bounds("app-search-navigation-error").is_some());
+            window
+                .update(visual, |shell, _, cx| {
+                    shell.workspace.preferences.monos = true;
+                    let preferences = shell.workspace.preferences.clone();
+                    shell
+                        .mono_manager()
+                        .update(cx, |manager, cx| manager.set_preferences(preferences, cx));
+                })
+                .unwrap();
+            cx.simulate_keystrokes(window.into(), "enter");
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, _, cx| {
+                    assert!(shell.app_search.is_none());
+                    assert!(!shell.sessions.contains_key(&root.id));
+                    let manager = shell.mono_manager();
+                    let manager = manager.read(cx);
+                    assert_eq!(manager.current().unwrap().id, "search-root");
+                    let chat = manager.open_chat("search-root").unwrap();
+                    assert_eq!(chat.read(cx).summary.id, root.id);
+                    assert!(chat.read(cx).history_loaded());
+                    assert_eq!(
+                        shell.saved_search.as_ref().unwrap().0,
+                        if panel { "" } else { query }
+                    );
+                    assert!(shell.error.is_none());
+                })
+                .unwrap();
+        }
+    }
     #[gpui::test]
     fn app_search_restores_draft_and_opens_cross_project_result(cx: &mut TestAppContext) {
         cx.update(|cx| {

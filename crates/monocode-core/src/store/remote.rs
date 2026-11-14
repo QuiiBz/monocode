@@ -183,7 +183,7 @@ impl Store {
             })
             .unwrap_or_else(|| Ok(BTreeMap::new()))
     }
-    fn remote_sessions(&self) -> Result<BTreeMap<i64, RemoteSession>, String> {
+    pub(super) fn remote_sessions(&self) -> Result<BTreeMap<i64, RemoteSession>, String> {
         let hidden = self.hidden_legacy_remote_sessions()?;
         let mut sessions = self.legacy_remote_sessions()?;
         sessions.retain(|id, _| !hidden.contains(id));

@@ -1586,10 +1586,15 @@ impl Store {
             .conn
             .progress_handler(2000, Some(move || flag.load(Ordering::Acquire))))?;
         let result = (|| {
-            let summaries = self.shared_sessions()?;
+            let summaries = self.search_summaries()?;
+            let remote_sessions = self.remote_sessions()?;
             let mut hits = Vec::new();
             let mut truncated = false;
-            'sessions: for summary in summaries.iter().filter(|s| !s.archived && s.has_messages) {
+            'sessions: for summary in summaries.iter().filter(|summary| {
+                !summary.archived
+                    && summary.has_messages
+                    && !remote_sessions.contains_key(&summary.id)
+            }) {
                 if cancel.load(Ordering::Acquire) {
                     return Ok((Vec::new(), false));
                 }

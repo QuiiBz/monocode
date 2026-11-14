@@ -90,6 +90,7 @@ pub(crate) struct Monos {
     _clock: Option<gpui::Task<()>>,
     writes: Option<gpui::Task<()>>,
     loading_chats: HashSet<String>,
+    search_jumps: HashMap<i64, (usize, String)>,
     work: work::Cache,
     pub(crate) error: Option<String>,
     notice_region: AnchorSlot,
@@ -333,6 +334,7 @@ impl Monos {
             _clock: None,
             writes: None,
             loading_chats: HashSet::new(),
+            search_jumps: HashMap::new(),
             work: work::Cache::default(),
             error: roster_error,
             notice_region,
@@ -868,6 +870,10 @@ impl Monos {
                         this.card_action(&source, &event.0, cx)
                     },
                 ));
+                let session = view.read(cx).summary.id;
+                if let Some((row, query)) = this.search_jumps.remove(&session) {
+                    view.update(cx, |view, cx| view.reveal_search(row, query, cx));
+                }
                 this.chats.insert(id.clone(), view);
                 if let Some(handle) = this.parent_window {
                     let owner = cx.weak_entity();

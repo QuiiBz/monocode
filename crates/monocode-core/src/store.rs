@@ -609,7 +609,7 @@ impl Store {
             .progress_handler(2000, Some(move || flag.load(Ordering::Acquire)))
             .map_err(|e| e.to_string())?;
         let result = (|| {
-            let summaries = self.sessions()?;
+            let summaries = self.search_summaries()?;
             // Walk each conversation's primary-key range in recency order.
             // Sorting a join containing every message body would copy the entire
             // transcript database into SQLite's sorter on every keystroke.

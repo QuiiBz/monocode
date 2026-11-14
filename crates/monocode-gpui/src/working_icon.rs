@@ -71,7 +71,7 @@ impl IntoElement for WorkingIcon {
 }
 impl Element for WorkingIcon {
     type RequestLayoutState = AnyElement;
-    type PrepaintState = ();
+    type PrepaintState = bool;
     fn id(&self) -> Option<ElementId> {
         Some("working-project-icon".into())
     }
@@ -114,12 +114,16 @@ impl Element for WorkingIcon {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         element: &mut AnyElement,
         window: &mut Window,
         cx: &mut App,
-    ) {
-        element.prepaint(window, cx);
+    ) -> bool {
+        let visible = bounds.intersects(&window.content_mask().bounds);
+        if visible {
+            element.prepaint(window, cx);
+        }
+        visible
     }
     fn paint(
         &mut self,
@@ -127,11 +131,13 @@ impl Element for WorkingIcon {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         element: &mut AnyElement,
-        _: &mut (),
+        visible: &mut bool,
         window: &mut Window,
         cx: &mut App,
     ) {
-        element.paint(window, cx);
+        if *visible {
+            element.paint(window, cx);
+        }
     }
 }
 
@@ -248,6 +254,52 @@ mod tests {
         visual.executor().advance_clock(Duration::from_secs(3));
         visual.run_until_parked();
         visual.update(|_, cx| assert!(!crate::pulse::running(cx)));
+    }
+
+    struct ClippedIcon {
+        visible: bool,
+        project: String,
+    }
+    impl Render for ClippedIcon {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(32.)).overflow_hidden().child(
+                div()
+                    .relative()
+                    .top(px(if self.visible { 0. } else { 100. }))
+                    .child(WorkingIcon::project(
+                        ProjectAppearance::default(),
+                        self.project.clone(),
+                        true,
+                        14.,
+                    )),
+            )
+        }
+    }
+    #[gpui::test]
+    fn offscreen_project_and_logo_icons_release_clock(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(false));
+        for project in ["/work/project", "remote://machine/project"] {
+            let (view, visual) = cx.add_window_view(|_, _| ClippedIcon {
+                visible: false,
+                project: project.into(),
+            });
+            visual.run_until_parked();
+            visual.update(|_, cx| assert!(!crate::pulse::running(cx)));
+            view.update(visual, |view, cx| {
+                view.visible = true;
+                cx.notify();
+            });
+            visual.run_until_parked();
+            visual.update(|_, cx| assert!(crate::pulse::running(cx)));
+            view.update(visual, |view, cx| {
+                view.visible = false;
+                cx.notify();
+            });
+            visual.run_until_parked();
+            visual.executor().advance_clock(Duration::from_secs(3));
+            visual.run_until_parked();
+            visual.update(|_, cx| assert!(!crate::pulse::running(cx)));
+        }
     }
 
     #[gpui::test]

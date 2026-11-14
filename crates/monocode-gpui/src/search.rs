@@ -1,9 +1,11 @@
 //! Global search, as the original full page (SearchView.tsx) or, when the
 //! `search_panel` preference is on, a floating command panel.
 use crate::{
+    conversation::Conversation,
     input::{self, Input},
     runtime::{Database, locked},
     theme::*,
+    working_icon::WorkingIcon,
 };
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, HighlightStyle,
@@ -29,9 +31,28 @@ pub(crate) enum Event {
     Open(Target, String),
     Close,
 }
+#[derive(Clone, PartialEq)]
+pub(crate) struct MonoIdentity {
+    label: String,
+    projects: Vec<String>,
+    mascot: String,
+    color: u32,
+}
+impl From<&monocode_core::mono::Mono> for MonoIdentity {
+    fn from(mono: &monocode_core::mono::Mono) -> Self {
+        Self {
+            label: mono.label(),
+            projects: mono.projects.clone(),
+            mascot: mono.mascot.clone(),
+            color: mono.color,
+        }
+    }
+}
 #[derive(Default)]
 pub(crate) struct Sources {
     pub summaries: Vec<Session>,
+    pub conversations: Vec<Entity<Conversation>>,
+    pub mono_roots: HashMap<i64, MonoIdentity>,
     pub live: HashMap<i64, Arc<Vec<Row>>>,
     pub projects: Vec<String>,
     pub recent: Vec<String>,
@@ -44,6 +65,9 @@ pub(crate) struct SearchView {
     cwd: String,
     store: Database,
     summaries: Vec<Session>,
+    working: HashMap<i64, bool>,
+    mono_roots: HashMap<i64, MonoIdentity>,
+    work_observations: HashMap<gpui::EntityId, Subscription>,
     live: HashMap<i64, Arc<Vec<Row>>>,
     projects: Vec<String>,
     recent: Vec<String>,
@@ -68,6 +92,7 @@ pub(crate) struct SearchView {
     files_loading: bool,
     truncated: (bool, bool),
     error: Option<String>,
+    navigation_error: Option<String>,
     cancel: Arc<AtomicBool>,
     listing_cancel: Arc<AtomicBool>,
     debounce: Option<Task<()>>,
@@ -125,6 +150,9 @@ impl SearchView {
             cwd,
             store,
             summaries: sources.summaries,
+            working: HashMap::new(),
+            mono_roots: sources.mono_roots,
+            work_observations: HashMap::new(),
             live: sources.live,
             projects: sources.projects,
             recent: sources.recent,
@@ -148,16 +176,179 @@ impl SearchView {
             files_loading: false,
             truncated: (false, false),
             error: None,
+            navigation_error: None,
             cancel: Arc::new(AtomicBool::new(false)),
             listing_cancel,
             debounce: None,
             _changed: changed,
         };
+        for conversation in sources.conversations {
+            view.watch_conversation(&conversation, cx);
+        }
         // Recent conversations show at once; recent files join once listed.
         if view.panel {
             view.hits = view.suggestions();
+            view.apply_mono_metadata();
         }
         view
+    }
+    pub(crate) fn watch_conversation(
+        &mut self,
+        conversation: &Entity<Conversation>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_working(conversation, cx);
+        if self
+            .work_observations
+            .contains_key(&conversation.entity_id())
+        {
+            return;
+        }
+        let observation = cx.observe(conversation, |_, conversation, cx| {
+            let search = cx.weak_entity();
+            let conversation = conversation.downgrade();
+            cx.defer(move |cx| {
+                if let Some(conversation) = conversation.upgrade() {
+                    let _ = search.update(cx, |search, cx| {
+                        search.sync_working(&conversation, cx);
+                    });
+                }
+            });
+        });
+        self.work_observations
+            .insert(conversation.entity_id(), observation);
+    }
+    fn sync_working(&mut self, conversation: &Entity<Conversation>, cx: &mut Context<Self>) {
+        let conversation = conversation.read(cx);
+        let session = conversation.summary.id;
+        let working = conversation.responding();
+        let changed = self.working.insert(session, working) != Some(working);
+        if changed {
+            cx.notify();
+        }
+    }
+    fn conversation_icon(&self, session: i64) -> WorkingIcon {
+        let project = self
+            .summaries
+            .iter()
+            .find(|summary| summary.id == session)
+            .map(|summary| summary.cwd.as_str())
+            .unwrap_or_default();
+        let working = self.working.get(&session).copied().unwrap_or(false);
+        if let Some(mono) = self.mono_roots.get(&session) {
+            WorkingIcon::mono(&mono.mascot, mono.color, working, 14.)
+        } else {
+            WorkingIcon::project(
+                self.project_appearance
+                    .get(project)
+                    .cloned()
+                    .unwrap_or_default(),
+                project.into(),
+                working,
+                14.,
+            )
+        }
+    }
+    fn search_summaries(&self) -> Vec<Session> {
+        self.summaries
+            .iter()
+            .cloned()
+            .map(|mut summary| {
+                if let Some(mono) = self.mono_roots.get(&summary.id) {
+                    summary.title = mono.label.clone();
+                }
+                summary
+            })
+            .collect()
+    }
+    pub(crate) fn contains_session(&self, session: i64) -> bool {
+        self.summaries.iter().any(|summary| summary.id == session)
+    }
+    pub(crate) fn set_mono_roots(
+        &mut self,
+        roots: HashMap<i64, MonoIdentity>,
+        summaries: Vec<Session>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.mono_roots != roots;
+        self.summaries.retain(|summary| {
+            !self.mono_roots.contains_key(&summary.id) || roots.contains_key(&summary.id)
+        });
+        self.mono_roots = roots;
+        for summary in summaries {
+            if let Some(existing) = self
+                .summaries
+                .iter_mut()
+                .find(|existing| existing.id == summary.id)
+            {
+                *existing = summary;
+            } else {
+                self.summaries.push(summary);
+            }
+        }
+        if changed {
+            self.rank(cx);
+        }
+    }
+    fn apply_mono_metadata(&mut self) {
+        for hit in &mut self.hits {
+            match hit.target {
+                Target::Conversation(session) => {
+                    if let Some(mono) = self.mono_roots.get(&session) {
+                        hit.meta = if mono.projects.is_empty() {
+                            "Mono".into()
+                        } else {
+                            mono.projects
+                                .iter()
+                                .map(|project| {
+                                    self.project_appearance
+                                        .get(project)
+                                        .cloned()
+                                        .unwrap_or_default()
+                                        .label(project)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                    }
+                }
+                Target::Message { session, .. } => {
+                    if let Some(mono) = self.mono_roots.get(&session) {
+                        hit.meta = mono.label.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    pub(crate) fn set_navigation_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.navigation_error = Some(error);
+        cx.notify();
+    }
+    fn navigation_notice(&self) -> Option<AnyElement> {
+        self.navigation_error.as_ref().map(|error| {
+            div()
+                .id("app-search-navigation-error")
+                .debug_selector(|| "app-search-navigation-error".into())
+                .role(Role::Alert)
+                .aria_label(error.clone())
+                .px_3()
+                .py_1()
+                .text_size(px(12.))
+                .text_color(content(0.75))
+                .child(error.clone())
+                .into_any_element()
+        })
+    }
+    pub(crate) fn set_project_appearance(
+        &mut self,
+        project: String,
+        appearance: ProjectAppearance,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_appearance.insert(project, appearance);
+        self.apply_mono_metadata();
+        cx.notify();
     }
     pub(crate) fn set_classic(&mut self, classic: bool, cx: &mut Context<Self>) {
         self.classic = classic;
@@ -214,7 +405,7 @@ impl SearchView {
                 .await;
             let Ok((work, revision)) = this.update(cx, |this, cx| {
                 let live = this.live.clone();
-                let summaries = this.summaries.clone();
+                let summaries = this.search_summaries();
                 let query = this.query.clone();
                 let flag = this.cancel.clone();
                 (
@@ -256,16 +447,19 @@ impl SearchView {
             }
         } else {
             search::grouped(
-                search::titles(&self.summaries, &self.query)
+                search::titles(&self.search_summaries(), &self.query)
                     .into_iter()
                     .chain(self.local.clone())
-                    .chain(self.remote.clone())
+                    .chain(self.remote.iter().filter(|hit| {
+                        !matches!(hit.target, Target::Conversation(session) if self.mono_roots.contains_key(&session))
+                    }).cloned())
                     .chain(search::filenames(&self.files, &self.query, &self.recent))
                     .chain(self.content.clone())
                     .chain(search::projects(&self.projects, &self.query)),
                 self.scope,
             )
         };
+        self.apply_mono_metadata();
         if self.active >= self.hits.len() {
             self.active = 0;
         }
@@ -281,6 +475,7 @@ impl SearchView {
         self.remote.clear();
         self.content.clear();
         self.error = None;
+        self.navigation_error = None;
         self.truncated = (false, false);
         self.sessions_loading = !self.query.is_empty() && self.scope.sessions();
         self.files_loading = !self.query.is_empty() && self.scope.files();
@@ -303,7 +498,7 @@ impl SearchView {
             let flag = self.cancel.clone();
             let check = flag.clone();
             let live = self.live.clone();
-            let summaries = self.summaries.clone();
+            let summaries = self.search_summaries();
             let revision = self.live_revision;
             let work = cx.background_executor().spawn(async move {
                 let mut local = vec![];
@@ -569,8 +764,8 @@ impl SearchView {
             Scope::Files => (0, 10, 0),
             Scope::Projects => (0, 0, 12),
         };
-        let mut recent: Vec<_> = self
-            .summaries
+        let summaries = self.search_summaries();
+        let mut recent: Vec<_> = summaries
             .iter()
             .filter(|s| !s.archived && s.has_messages)
             .collect();
@@ -647,7 +842,7 @@ impl SearchView {
     fn row(&self, ix: usize, hit: &Hit, cx: &mut Context<Self>) -> AnyElement {
         let active = self.active == ix;
         let mark = match &hit.target {
-            Target::Conversation(_) => provider_icon(&hit.provider, 14.).into_any_element(),
+            Target::Conversation(session) => self.conversation_icon(*session).into_any_element(),
             Target::Message { .. } => icon("message-square", 14.)
                 .text_color(content(0.6))
                 .into_any_element(),
@@ -658,7 +853,7 @@ impl SearchView {
                 self.project_appearance
                     .get(path)
                     .unwrap_or(&ProjectAppearance::default()),
-                &search::project_name(path),
+                path,
                 16.,
             ),
         };
@@ -765,7 +960,9 @@ impl SearchView {
             .enumerate()
             .map(|(ix, hit)| {
                 let mark = match &hit.target {
-                    Target::Conversation(_) => provider_icon(&hit.provider, 14.).into_any_element(),
+                    Target::Conversation(session) => {
+                        self.conversation_icon(*session).into_any_element()
+                    }
                     Target::Message { .. } => icon("message-square", 14.)
                         .text_color(content(0.55))
                         .into_any_element(),
@@ -779,7 +976,7 @@ impl SearchView {
                         self.project_appearance
                             .get(path)
                             .unwrap_or(&ProjectAppearance::default()),
-                        &search::project_name(path),
+                        path,
                         14.,
                     ),
                 };
@@ -959,6 +1156,7 @@ impl SearchView {
                             }),
                     ),
             )
+            .children(self.navigation_notice())
             .child(if self.query.is_empty() {
                 empty_state()
             } else {
@@ -1159,6 +1357,7 @@ impl SearchView {
                             }),
                     ),
             )
+            .children(self.navigation_notice())
             .child(
                 div()
                     .id("app-search-results")
@@ -1240,6 +1439,303 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    fn check_conversation_work_icons(cx: &mut TestAppContext, panel: bool, reduced_motion: bool) {
+        cx.update(|cx| {
+            input::bind(cx);
+            crate::shell::bind_keys(cx);
+            cx.set_reduce_motion(reduced_motion);
+        });
+        let directory = TempDir::new();
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let mut first = store.create("codex", "/one/project").unwrap();
+        let mut second = store.create("claude", "/two/project").unwrap();
+        first.title = "Needle first".into();
+        second.title = "Needle second".into();
+        let first_id = first.id;
+        let second_id = second.id;
+        let appearance = ProjectAppearance {
+            color: Some(0x39c363),
+            mascot: Some("cat".into()),
+            ..Default::default()
+        };
+        let database = Arc::new(Mutex::new(store));
+        let conversation = cx.new(|cx| Conversation::new(first.clone(), database.clone(), cx));
+        let other_conversation =
+            cx.new(|cx| Conversation::new(second.clone(), database.clone(), cx));
+        let (search, visual) = cx.add_window_view(|window, cx| {
+            let mut search = SearchView::new(
+                directory.path().to_string_lossy().into_owned(),
+                database,
+                Sources {
+                    summaries: vec![first, second],
+                    conversations: vec![conversation.clone()],
+                    project_appearance: HashMap::from([(
+                        "/one/project".into(),
+                        appearance.clone(),
+                    )]),
+                    panel,
+                    ..Default::default()
+                },
+                cx,
+            );
+            search.scope = Scope::Conversations;
+            search.query = "needle".into();
+            search.rank(cx);
+            window.focus(&search.focus_handle(cx), cx);
+            search
+        });
+        visual.run_until_parked();
+        let hits = search.read_with(visual, |search, _| {
+            assert!(
+                search.conversation_icon(first_id)
+                    == WorkingIcon::project(appearance.clone(), "/one/project".into(), false, 14.)
+            );
+            assert!(
+                search.conversation_icon(second_id)
+                    == WorkingIcon::project(
+                        ProjectAppearance::default(),
+                        "/two/project".into(),
+                        false,
+                        14.
+                    )
+            );
+            assert_eq!(search.hits.len(), 2);
+            search.hits.as_ptr()
+        });
+        visual.update(|_, cx| assert!(!crate::pulse::running(cx)));
+        visual.simulate_keystrokes("down");
+        let selected = search.read_with(visual, |search, _| search.active);
+        assert_eq!(selected, 1);
+        for outcome in ["finish", "error", "cancel"] {
+            conversation.update(visual, |conversation, cx| {
+                conversation.busy = true;
+                cx.notify();
+            });
+            visual.run_until_parked();
+            search.read_with(visual, |search, _| {
+                assert!(
+                    search.conversation_icon(first_id)
+                        == WorkingIcon::project(
+                            appearance.clone(),
+                            "/one/project".into(),
+                            true,
+                            14.
+                        )
+                );
+                assert_eq!(search.hits.as_ptr(), hits);
+                assert_eq!(search.active, selected);
+            });
+            visual.update(|_, cx| assert_eq!(crate::pulse::running(cx), !reduced_motion));
+            visual.executor().advance_clock(Duration::from_millis(500));
+            visual.run_until_parked();
+            search.read_with(visual, |search, _| assert_eq!(search.hits.as_ptr(), hits));
+            conversation.update(visual, |conversation, cx| {
+                if outcome == "cancel" {
+                    conversation.stop_if_busy(cx);
+                } else {
+                    conversation.busy = false;
+                    cx.notify();
+                }
+            });
+            visual.run_until_parked();
+            search.read_with(visual, |search, _| {
+                assert!(
+                    search.conversation_icon(first_id)
+                        == WorkingIcon::project(
+                            appearance.clone(),
+                            "/one/project".into(),
+                            false,
+                            14.
+                        )
+                );
+                assert_eq!(search.active, selected);
+            });
+            visual.executor().advance_clock(Duration::from_secs(3));
+            visual.run_until_parked();
+            visual.update(|_, cx| assert!(!crate::pulse::running(cx)));
+        }
+        search.update(visual, |search, cx| {
+            search.watch_conversation(&other_conversation, cx)
+        });
+        other_conversation.update(visual, |conversation, cx| {
+            conversation.busy = true;
+            cx.notify();
+        });
+        visual.run_until_parked();
+        search.read_with(visual, |search, _| {
+            assert!(
+                search.conversation_icon(second_id)
+                    == WorkingIcon::project(
+                        ProjectAppearance::default(),
+                        "/two/project".into(),
+                        true,
+                        14.
+                    )
+            );
+        });
+        other_conversation.update(visual, |conversation, cx| {
+            conversation.busy = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+        visual.executor().advance_clock(Duration::from_secs(3));
+        visual.run_until_parked();
+        search.update(visual, |search, _| {
+            search.mono_roots.insert(
+                second_id,
+                MonoIdentity {
+                    label: "Ghost".into(),
+                    projects: vec![],
+                    mascot: "ghost".into(),
+                    color: 0x459cf7,
+                },
+            );
+            assert!(
+                search.conversation_icon(second_id)
+                    == WorkingIcon::mono("ghost", 0x459cf7, false, 14.)
+            );
+        });
+    }
+    #[gpui::test]
+    fn conversation_scope_panel_tracks_live_work(cx: &mut TestAppContext) {
+        check_conversation_work_icons(cx, true, false);
+    }
+    #[gpui::test]
+    fn conversation_scope_page_tracks_live_work(cx: &mut TestAppContext) {
+        check_conversation_work_icons(cx, false, false);
+    }
+    #[gpui::test]
+    fn conversation_scope_respects_reduced_motion(cx: &mut TestAppContext) {
+        check_conversation_work_icons(cx, true, true);
+    }
+    #[gpui::test]
+    fn mono_search_uses_current_identity_and_deduplicates_saved_and_live_history(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = TempDir::new();
+        let mut store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let mut summary = store.create("codex", "/Users/tom").unwrap();
+        summary.title = "MonoInvader".into();
+        store.title(summary.id, &summary.title).unwrap();
+        let rows = vec![Row {
+            role: "user".into(),
+            text: "needle history".into(),
+            first: true,
+            sent_at: None,
+        }];
+        store.write_rows(summary.id, 0, &rows).unwrap();
+        let mono = monocode_core::mono::Mono {
+            name: "Chief".into(),
+            session_id: Some(summary.id),
+            projects: vec!["/assigned/project".into()],
+            mascot: "invader".into(),
+            color: 0xea603e,
+            ..Default::default()
+        };
+        let mut roster = monocode_core::mono::Roster::default();
+        roster.monos.push(mono.clone());
+        roster.save(&store).unwrap();
+        let session = summary.id;
+        let database = Arc::new(Mutex::new(store));
+        let conversation = cx.new(|cx| Conversation::new(summary.clone(), database.clone(), cx));
+        let (search, visual) = cx.add_window_view(|_, cx| {
+            SearchView::new(
+                directory.path().to_string_lossy().into_owned(),
+                database,
+                Sources {
+                    summaries: vec![summary.clone()],
+                    mono_roots: HashMap::from([(session, MonoIdentity::from(&mono))]),
+                    project_appearance: HashMap::from([(
+                        "/assigned/project".into(),
+                        ProjectAppearance {
+                            name: "Assigned".into(),
+                            ..Default::default()
+                        },
+                    )]),
+                    panel: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        search.update(visual, |search, cx| {
+            search.restore_draft(("Chief".into(), Scope::Conversations), cx)
+        });
+        visual.run_until_parked();
+        visual.executor().advance_clock(Duration::from_millis(200));
+        visual.run_until_parked();
+        search.read_with(visual, |search, _| {
+            assert_eq!(search.hits.len(), 1);
+            assert_eq!(search.hits[0].title, "Chief");
+            assert_eq!(search.hits[0].meta, "Assigned");
+            assert_eq!(
+                search.hits[0]
+                    .highlights
+                    .iter()
+                    .map(|range| &search.hits[0].title[range.clone()])
+                    .collect::<String>(),
+                "Chief"
+            );
+            assert!(
+                search.conversation_icon(session)
+                    == WorkingIcon::mono("invader", 0xea603e, false, 14.)
+            );
+        });
+        search.update(visual, |search, cx| {
+            search.watch_conversation(&conversation, cx);
+            search.update_session(summary, Arc::new(rows), cx);
+            search.restore_draft(("needle".into(), Scope::Conversations), cx);
+        });
+        visual.run_until_parked();
+        visual.executor().advance_clock(Duration::from_millis(200));
+        visual.run_until_parked();
+        search.read_with(visual, |search, _| {
+            assert_eq!(search.hits.len(), 1);
+            assert!(matches!(search.hits[0].target, Target::Message { session: target, .. } if target == session));
+            assert_eq!(search.hits[0].meta, "Chief");
+        });
+        search.update(visual, |search, cx| {
+            search.restore_draft(("Chief".into(), Scope::Conversations), cx)
+        });
+        visual.run_until_parked();
+        let hits = search.read_with(visual, |search, _| search.hits.as_ptr());
+        conversation.update(visual, |conversation, cx| {
+            conversation.busy = true;
+            cx.notify();
+        });
+        visual.run_until_parked();
+        search.read_with(visual, |search, _| {
+            assert!(
+                search.conversation_icon(session)
+                    == WorkingIcon::mono("invader", 0xea603e, true, 14.)
+            );
+            assert_eq!(search.hits.as_ptr(), hits);
+        });
+        conversation.update(visual, |conversation, cx| conversation.stop_if_busy(cx));
+        visual.run_until_parked();
+        search.read_with(visual, |search, _| {
+            assert!(
+                search.conversation_icon(session)
+                    == WorkingIcon::mono("invader", 0xea603e, false, 14.)
+            )
+        });
+        let mut renamed = mono.clone();
+        renamed.name = "Chief Officer".into();
+        renamed.projects.clear();
+        search.update(visual, |search, cx| {
+            search.set_mono_roots(
+                HashMap::from([(session, MonoIdentity::from(&renamed))]),
+                vec![],
+                cx,
+            )
+        });
+        visual.run_until_parked();
+        search.read_with(visual, |search, _| {
+            assert_eq!(search.hits.len(), 1);
+            assert_eq!(search.hits[0].title, "Chief Officer");
+            assert_eq!(search.hits[0].meta, "Mono");
+        });
     }
     #[gpui::test]
     fn app_search_debounce_scope_keyboard_and_stale_results(cx: &mut TestAppContext) {
