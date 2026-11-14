@@ -65,6 +65,7 @@ use std::{
 // this width the empty session drops its title.
 const COMPOSER_COLUMN: f32 = COLUMN;
 const COMPOSER_RADIUS: f32 = 12.;
+const COMPOSER_FOOTER_GAP: f32 = 6.;
 // RUNTIME_MODE_LABEL and RUNTIME_MODE_HINT from the React session model,
 // with AccessPicker's icons; Full access is amber.
 const ACCESS_MODES: &[(&str, &str, &str, &str)] = &[
@@ -2610,6 +2611,7 @@ impl Conversation {
                             .disabled(self.busy || self.follow_ups.state.draft.is_some()),
                     ]
                     .into_iter()
+                    .filter(|action| self.settings.mono.is_none() || action.id.as_ref() == "upload")
                     .map(|action| {
                         let checked = match action.id.as_ref() {
                             "plan" => self.settings.plan,
@@ -2827,6 +2829,30 @@ impl Conversation {
         runner.update(cx, |r, cx| r.configure(self.busy, name, color, cx));
         Some(runner)
     }
+    fn add_trigger(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        tool_pill(id, label)
+            .debug_selector(move || id.into())
+            .aria_expanded(self.menu_is(ComposerMenu::Add))
+            .when(self.menu_is(ComposerMenu::Add), |d| d.bg(content(0.2)))
+            .child(self.add_anchor.probe())
+            .on_click(
+                cx.listener(|this, _, window, cx| this.toggle_menu(ComposerMenu::Add, window, cx)),
+            )
+            .w(px(26.))
+            .justify_center()
+            .text_color(content(0.5))
+            .child(
+                icon("plus", 14.)
+                    .text_color(content(0.5))
+                    .group_hover(id, |s| s.text_color(content(1.))),
+            )
+            .into_any_element()
+    }
     fn composer(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let radius = COMPOSER_RADIUS;
         let command = if self.follow_ups.draft_selected {
@@ -2991,23 +3017,7 @@ impl Conversation {
                             .px_2()
                             .pb(px(10.))
                             .child(
-                                tool_pill("composer-add", "Add files or choose a mode")
-                                    .aria_expanded(self.menu_is(ComposerMenu::Add))
-                                    .when(self.menu_is(ComposerMenu::Add), |d| d.bg(content(0.2)))
-                                    .child(self.add_anchor.probe())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_menu(ComposerMenu::Add, window, cx)
-                                    }))
-                                    .w(px(26.))
-                                    .justify_center()
-                                    .text_color(content(0.5))
-                                    .child(
-                                        icon("plus", 14.)
-                                            .text_color(content(0.5))
-                                            .group_hover("composer-add", |s| {
-                                                s.text_color(content(1.))
-                                            }),
-                                    ),
+                                self.add_trigger("composer-add", "Add files or choose a mode", cx),
                             )
                             .child(
                                 div()
@@ -3189,8 +3199,9 @@ impl Conversation {
             .flex()
             .items_center()
             .gap(px(10.))
-            .pt(px(6.))
-            .px(px(15.))
+            .pt(px(COMPOSER_FOOTER_GAP))
+            .pl(px(15.))
+            .pr(px(9.))
             .child(workspace)
             .when_some(branch, |d, branch| {
                 let detached = !new && self.git.as_ref().is_some_and(|s| s.detached);
@@ -3263,8 +3274,7 @@ impl Conversation {
                     )
                     .when(show_context, |d| {
                         d.child(
-                            div()
-                                .id("context-meter")
+                            crate::context_meter::container("context-meter")
                                 .role(Role::Image)
                                 .aria_label(format!(
                                     "{headline}{}",
@@ -3648,6 +3658,84 @@ mod composer_motion_tests {
             assert_eq!(*initial_position.get_or_insert(position), position);
         }
     }
+    #[gpui::test]
+    fn context_meters_share_hover_background_and_send_alignment(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let window = window(cx, 1000.);
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        for mono in [false, true] {
+            window
+                .update(visual, |conversation, _, cx| {
+                    if mono {
+                        conversation.configure_mono(
+                            monocode_core::mono::Mono::default(),
+                            "/work/monocode".into(),
+                            Default::default(),
+                            cx,
+                        );
+                    }
+                    conversation
+                        .input
+                        .update(cx, |input, cx| input.set_text(String::new(), cx));
+                    cx.notify();
+                })
+                .unwrap();
+            visual.run_until_parked();
+            visual.refresh().unwrap();
+            let selector = if mono {
+                "mono-context-meter"
+            } else {
+                "context-meter"
+            };
+            let meter = visual.debug_bounds(selector).unwrap();
+            let composer = visual
+                .debug_bounds(if mono {
+                    "mono-composer"
+                } else {
+                    "composer-box"
+                })
+                .unwrap();
+            assert_eq!(meter.top() - composer.bottom(), px(6.));
+            let send = visual.debug_bounds("send-or-stop").unwrap();
+            assert_eq!(meter.size, size(px(26.), px(26.)));
+            assert!((f32::from(meter.center().x - send.center().x)).abs() < 0.5);
+            for hovered in [false, true, false] {
+                visual.simulate_event(gpui::MouseMoveEvent {
+                    position: if hovered {
+                        meter.center()
+                    } else {
+                        point(px(1.), px(1.))
+                    },
+                    pressed_button: None,
+                    modifiers: Default::default(),
+                });
+                visual.run_until_parked();
+                visual.refresh().unwrap();
+                window
+                    .update(visual, |conversation, window, _| {
+                        assert_eq!(conversation.context_hovered, hovered);
+                        let scale = window.scale_factor();
+                        let background = window.painted_quads().iter().any(|quad| {
+                            quad.background.as_solid() == Some(content(0.08))
+                                && (quad.bounds.origin.x.0 / scale - f32::from(meter.left())).abs()
+                                    < 0.5
+                                && (quad.bounds.origin.y.0 / scale - f32::from(meter.top())).abs()
+                                    < 0.5
+                                && (quad.bounds.size.width.0 / scale - 26.).abs() < 0.5
+                                && (quad.bounds.size.height.0 / scale - 26.).abs() < 0.5
+                                && (quad.corner_radii.top_left.0 / scale - 13.).abs() < 0.5
+                        });
+                        assert_eq!(background, hovered);
+                    })
+                    .unwrap();
+                assert_eq!(
+                    visual.debug_bounds("context-usage-panel").is_some(),
+                    hovered
+                );
+            }
+        }
+    }
+
     #[gpui::test]
     fn composer_uses_react_surface_and_equal_text_padding_with_attachments(
         cx: &mut TestAppContext,
@@ -4877,6 +4965,55 @@ mod menu_tests {
         window
             .update(visual, |c, _, _| assert!(c.menu.is_none()))
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn add_menu_keeps_session_modes_and_limits_monos_to_upload(cx: &mut TestAppContext) {
+        let window = conversation(cx);
+        window
+            .update(cx, |conversation, window, cx| {
+                for mono in [false, true] {
+                    if mono {
+                        conversation.configure_mono(
+                            monocode_core::mono::Mono::default(),
+                            "/work/monocode".into(),
+                            Default::default(),
+                            cx,
+                        );
+                    }
+                    for busy in [false, true] {
+                        conversation.busy = busy;
+                        let (_, items, width, style) =
+                            conversation.menu_items(ComposerMenu::Add, &mut Vec::new(), window, cx);
+                        let actions: Vec<_> = items
+                            .iter()
+                            .filter_map(|item| match item {
+                                MenuItem::Action(action) => Some(action.id.as_ref()),
+                                _ => None,
+                            })
+                            .collect();
+                        assert_eq!(
+                            actions,
+                            if mono {
+                                vec!["upload"]
+                            } else {
+                                vec!["upload", "plan", "operator", "orchestrator", "draft"]
+                            }
+                        );
+                        assert_eq!(width, 250.);
+                        assert!(matches!(style, MenuStyle::Composer));
+                    }
+                }
+            })
+            .unwrap();
+        open(window, ComposerMenu::Add, cx);
+        open(window, ComposerMenu::Add, cx);
+        window
+            .update(cx, |conversation, _, _| {
+                assert!(conversation.menu.is_none())
+            })
+            .unwrap();
+        assert!(input_focused(window, cx));
     }
 
     #[gpui::test]

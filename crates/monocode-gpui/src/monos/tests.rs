@@ -1633,7 +1633,11 @@ fn queued_messages_are_saved_before_dispatch_and_do_not_run_while_blocked(cx: &m
 #[gpui::test]
 fn chat_composer_matches_the_session_box_and_opens_the_model_list(cx: &mut TestAppContext) {
     let s = setup(cx);
-    cx.update(|cx| cx.set_reduce_motion(true));
+    cx.update(|cx| {
+        cx.set_reduce_motion(true);
+        input::bind(cx);
+        crate::popover::bind(cx);
+    });
     let handle: gpui::AnyWindowHandle = s.window.into();
     handle
         .update(cx, |_, w, cx| {
@@ -1644,7 +1648,7 @@ fn chat_composer_matches_the_session_box_and_opens_the_model_list(cx: &mut TestA
     visual.run_until_parked();
     let field = visual.debug_bounds("mono-composer").unwrap();
     let send = visual.debug_bounds("mono-send").unwrap();
-    let attach = visual.debug_bounds("mono-attach").unwrap();
+    let add = visual.debug_bounds("mono-add").unwrap();
     let model = visual.debug_bounds("mono-model").unwrap();
     // A click anywhere in the box, toolbar included, focuses the field.
     let toolbar = visual.debug_bounds("mono-composer-toolbar").unwrap();
@@ -1670,13 +1674,16 @@ fn chat_composer_matches_the_session_box_and_opens_the_model_list(cx: &mut TestA
     // One line: the session composer's 84px box; send sits 10px above the border.
     assert_eq!(field.size.height, px(84.));
     assert_eq!(field.bottom() - send.bottom(), px(11.));
-    // The session composer's box: the model picker and send inside it,
-    // attach underneath on the left.
+    // Add, model and send share the toolbar inside the box.
     assert!(field.contains(&send.center()));
     assert!(field.contains(&model.center()));
     assert!(model.right() < send.left());
-    assert!(attach.top() >= field.bottom());
-    assert_eq!(attach.size, gpui::size(px(26.), px(26.)));
+    assert!(field.contains(&add.center()));
+    assert_eq!(add.center().y, model.center().y);
+    assert_eq!(model.left() - add.right(), px(4.));
+    assert_eq!(add.size, gpui::size(px(26.), px(26.)));
+    assert!(visual.debug_bounds("mono-attach").is_none());
+    assert!(visual.debug_bounds("mono-emoji").is_none());
     let meter = visual.debug_bounds("mono-context-meter").unwrap();
     assert!(
         (f32::from(meter.center().x) - f32::from(send.center().x)).abs() < 0.5,
@@ -1696,10 +1703,51 @@ fn chat_composer_matches_the_session_box_and_opens_the_model_list(cx: &mut TestA
         visual.refresh().unwrap();
         let field = visual.debug_bounds("mono-composer").unwrap();
         let send = visual.debug_bounds("mono-send").unwrap();
-        let attach = visual.debug_bounds("mono-attach").unwrap();
+        let add = visual.debug_bounds("mono-add").unwrap();
         assert!(field.contains(&send.center()));
-        assert!(attach.top() >= field.bottom());
+        assert!(field.contains(&add.center()));
+        let model = visual.debug_bounds("mono-model").unwrap();
+        assert_eq!(model.left() - add.right(), px(4.));
     }
+    visual.simulate_click(add.center(), Default::default());
+    visual.run_until_parked();
+    visual.refresh().unwrap();
+    assert!(!visual.did_prompt_for_paths());
+    assert!(visual.debug_bounds("menu-action-upload").is_some());
+    for selector in [
+        "menu-action-plan",
+        "menu-action-operator",
+        "menu-action-orchestrator",
+        "menu-action-draft",
+    ] {
+        assert!(visual.debug_bounds(selector).is_none());
+    }
+    visual.simulate_keystrokes("down enter");
+    visual.run_until_parked();
+    assert!(visual.did_prompt_for_paths());
+    visual.simulate_path_prompt_response(|options| {
+        assert!(options.files && options.multiple);
+        assert!(!options.directories);
+        None
+    });
+    visual.run_until_parked();
+    visual.refresh().unwrap();
+    let add = visual.debug_bounds("mono-add").unwrap();
+    visual.simulate_click(add.center(), Default::default());
+    visual.run_until_parked();
+    visual.simulate_keystrokes("down escape");
+    visual.run_until_parked();
+    visual.refresh().unwrap();
+    assert!(visual.debug_bounds("menu-action-upload").is_none());
+    assert!(
+        handle
+            .update(visual, |_, window, cx| chat
+                .read(cx)
+                .input
+                .focus_handle(cx)
+                .is_focused(window))
+            .unwrap()
+    );
     handle
         .update(visual, |_, w, cx| {
             chat.update(cx, |c, cx| c.toggle_model_menu(w, cx))

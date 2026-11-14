@@ -1,6 +1,19 @@
 use crate::theme::*;
 use gpui::{Bounds, PathBuilder, canvas, div, fill, point, prelude::*, px, size};
 
+pub(crate) fn container(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_shrink_0()
+        .size(px(26.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .hover(|style| style.bg(content(0.08)))
+}
+
 /// ContextMeter.tsx: 14px, 2px stroke, 25% track, clockwise from twelve.
 pub(crate) fn ring(ratio: f32) -> impl IntoElement {
     let color = if ratio >= 0.9 {

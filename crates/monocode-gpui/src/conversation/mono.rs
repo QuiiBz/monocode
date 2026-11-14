@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{App, EntityInputHandler};
+use gpui::App;
 use monocode_core::mono::{Message, Mono};
 use std::path::PathBuf;
 #[derive(Default)]
@@ -10,7 +10,6 @@ pub(super) struct ChatState {
     queue_list_focus: Option<gpui::FocusHandle>,
     queue_window: Option<gpui::AnyWindowHandle>,
     queue_focus: std::collections::HashMap<String, ([gpui::FocusHandle; 2], [Subscription; 2])>,
-    pub(super) emoji: bool,
     pub(super) delivered: std::collections::HashSet<String>,
     pub(super) sending: Option<String>,
     pub(super) failed: Vec<(String, String)>,
@@ -1025,6 +1024,7 @@ impl Conversation {
                     .gap_1()
                     .px_2()
                     .pb(px(10.))
+                    .child(self.add_trigger("mono-add", "Add files", cx))
                     .child(
                         div()
                             .flex_1()
@@ -1249,23 +1249,8 @@ impl Conversation {
         }
         pills
     }
-    /// Under the box: attach and emoji on the left, the context meter on the
-    /// right.
+    /// The context meter sits under send on the right.
     fn mono_composer_tools(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let tool = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .role(Role::Button)
-                .aria_label(label)
-                .group(id)
-                .flex_shrink_0()
-                .size(px(26.))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|s| s.bg(content(0.08)))
-        };
         let ratio = self.context.and_then(|usage| usage.ratio());
         let headline = ratio
             .map(|r| format!("{:.0}% context used", r * 100.))
@@ -1282,63 +1267,11 @@ impl Conversation {
             .flex()
             .items_center()
             .gap(px(2.))
-            .pt_1()
+            .pt(px(COMPOSER_FOOTER_GAP))
             .pl_1()
             // The box's 1px border plus its toolbar's 8px: the meter sits
             // straight under send.
             .pr(px(9.))
-            .child(
-                tool("mono-attach", "Attach files")
-                    .debug_selector(|| "mono-attach".into())
-                    .child(
-                        icon("mono-attach", 17.)
-                            .text_color(content(0.55))
-                            .group_hover("mono-attach", |s| s.text_color(content(1.))),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_attachments(cx))),
-            )
-            .child(
-                tool("mono-emoji", "Add emoji")
-                    .when(self.mono_ui.emoji, |d| d.bg(content(0.08)))
-                    .child(
-                        icon("smile", 13.)
-                            .text_color(content(if self.mono_ui.emoji { 1. } else { 0.55 }))
-                            .group_hover("mono-emoji", |s| s.text_color(content(1.))),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if cfg!(target_os = "macos") {
-                            window.focus(&this.input.focus_handle(cx), cx);
-                            window.show_character_palette();
-                            return;
-                        }
-                        this.mono_ui.emoji = !this.mono_ui.emoji;
-                        cx.notify();
-                    })),
-            )
-            .when(self.mono_ui.emoji, |d| {
-                d.child(
-                    div().flex().gap_1().children(
-                        ["👍", "❤️", "🙂", "🎉", "👀", "✨", "🙏", "🚀"]
-                            .into_iter()
-                            .enumerate()
-                            .map(|(ix, emoji)| {
-                                div()
-                                    .id(("mono-emoji", ix))
-                                    .text_size(px(18.))
-                                    .rounded_md()
-                                    .hover(|s| s.bg(content(0.1)))
-                                    .child(emoji)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.input.update(cx, |i, cx| {
-                                            i.replace_text_in_range(None, emoji, window, cx)
-                                        });
-                                        this.mono_ui.emoji = false;
-                                        cx.notify();
-                                    }))
-                            }),
-                    ),
-                )
-            })
             .child(
                 div()
                     .ml_auto()
@@ -1349,9 +1282,7 @@ impl Conversation {
                     .child(
                         // A Mono is one long conversation; this is how full its
                         // current thread is. It rotates threads itself.
-                        div()
-                            .id("mono-context-meter")
-                            .debug_selector(|| "mono-context-meter".into())
+                        crate::context_meter::container("mono-context-meter")
                             .role(Role::Image)
                             .aria_label(format!(
                                 "{headline}{}",
@@ -1360,13 +1291,6 @@ impl Conversation {
                                     .map(|s| format!(", {s}"))
                                     .unwrap_or_default()
                             ))
-                            .flex_shrink_0()
-                            .size(px(26.))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.bg(content(0.08)))
                             .child(self.context_anchor.probe())
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                                 this.hover_context(*hovered, cx);
