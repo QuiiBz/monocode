@@ -19,7 +19,7 @@ enum Row {
     Session(i64),
     GroupedSession {
         id: i64,
-        first: bool,
+        first_in_folder: bool,
         last: bool,
     },
     ClassicGroupMember {
@@ -341,7 +341,7 @@ impl Shell {
                         .enumerate()
                         .map(|(ix, id)| Row::GroupedSession {
                             id: *id,
-                            first: ix == 0,
+                            first_in_folder: ix == 0 && matches!(entry, Entry::Folder { .. }),
                             last: ix + 1 == members.len(),
                         }),
                 );
@@ -519,14 +519,18 @@ impl Shell {
                 .when(first, |d| d.child(self.sidebar_filter_button(cx)))
                 .into_any(),
             Row::Session(id) => self.session_card(id, cx),
-            Row::GroupedSession { id, first, last } => {
+            Row::GroupedSession {
+                id,
+                first_in_folder,
+                last,
+            } => {
                 return div()
                     .px_2()
                     .child(
                         div()
                             .ml(px(10.))
-                            .when(first, |d| d.pt_1())
-                            .child(rails::step(last, self.nested_session_card(id, cx))),
+                            .when(first_in_folder, |d| d.pt_1())
+                            .child(rails::step(last, 0., self.nested_session_card(id, cx))),
                     )
                     .into_any();
             }
@@ -562,7 +566,7 @@ impl Shell {
         };
         div()
             .when(self.workspace.classic_layout, |d| d.px(px(6.)))
-            .when(!self.workspace.classic_layout, |d| d.px_2().pb_px())
+            .when(!self.workspace.classic_layout, |d| d.px_2())
             .child(content)
             .into_any()
     }
@@ -651,7 +655,7 @@ impl Shell {
             }))
             .flex()
             .flex_col()
-            .gap_px()
+            .when(self.workspace.classic_layout, |d| d.gap_px())
             .when(search_field, |d| {
                 d.child(
                     div()
@@ -769,13 +773,7 @@ impl Shell {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(content(if selected || self.sidebar_hover == Some(label) {
-                            1.
-                        } else {
-                            0.5
-                        }))
+                        .map(|d| sidebar_row_text(d, selected || self.sidebar_hover == Some(label)))
                         .when(selected, |d| d.bg(content(0.1)))
                         .hover(|s| s.bg(content(0.1)).text_color(content(1.)))
                         .child(icon(glyph, 16.).text_color(content(if selected {
@@ -1032,6 +1030,19 @@ mod tests {
                 })
                 .unwrap();
             visual.run_until_parked();
+            for labels in ["New", "Inbox", "Notes", "Automations"].windows(2) {
+                let previous = visual
+                    .debug_bounds(Box::leak(
+                        format!("sidebar-navigation-{}", labels[0]).into_boxed_str(),
+                    ))
+                    .unwrap();
+                let next = visual
+                    .debug_bounds(Box::leak(
+                        format!("sidebar-navigation-{}", labels[1]).into_boxed_str(),
+                    ))
+                    .unwrap();
+                assert_eq!(previous.bottom(), next.top(), "sidebar entries have no gap");
+            }
             let axis = visual
                 .debug_bounds("sidebar-filter-button")
                 .unwrap()

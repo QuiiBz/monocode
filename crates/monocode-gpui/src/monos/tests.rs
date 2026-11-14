@@ -2412,6 +2412,17 @@ fn sidebar_mono_only_marks_unread_replies_and_swaps_the_mark_for_options_on_hove
         .debug_bounds(unread_selector)
         .expect("an unseen assistant reply has an accent circle");
     assert_eq!(unread.size, gpui::size(px(6.), px(6.)));
+    s.window
+        .update(visual, |_, window, _| {
+            let unread = unread.scale(window.scale_factor());
+            let badge = window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| quad.bounds == unread)
+                .expect("the unread badge is painted");
+            assert_eq!(badge.background.as_solid(), Some(accent_color()));
+        })
+        .unwrap();
     assert!(visual.debug_bounds(options_selector).is_none());
     let before_hover = visual.debug_bounds(row_selector).unwrap();
     visual.simulate_mouse_move(before_hover.center(), None, Default::default());

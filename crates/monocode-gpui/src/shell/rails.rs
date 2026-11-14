@@ -52,14 +52,17 @@ pub(crate) enum Rail {
     Agents(monocode_core::orchestration::Summary),
 }
 
-/// `.zen-phase-step.orchestration-tree-step`: a step branching off the
-/// transcript's tool rail, its row 2px lower inside the step's padding.
-pub(super) fn step(last: bool, child: impl IntoElement) -> gpui::Div {
+/// A sidebar branch aligned with the row's vertical padding.
+pub(super) fn step(last: bool, vertical_padding: f32, child: impl IntoElement) -> gpui::Div {
     div()
         .relative()
         .pl(px(20.))
-        .py(px(2.))
-        .child(crate::activity::rail_branch_at(last, true, 2.))
+        .py(px(vertical_padding))
+        .child(crate::activity::rail_branch_at(
+            last,
+            true,
+            vertical_padding,
+        ))
         .child(child)
 }
 
@@ -223,12 +226,12 @@ impl Shell {
         }
         let body = match &rail {
             Rail::Started(children) => div()
-                .pt_1()
                 .flex()
                 .flex_col()
                 .children(children.iter().enumerate().map(|(ix, child)| {
                     step(
                         ix + 1 == children.len(),
+                        0.,
                         self.session_row_with(*child, true, None, cx),
                     )
                 }))
@@ -983,7 +986,7 @@ impl Shell {
                         if classic {
                             row.into_any_element()
                         } else {
-                            step(ix + 1 == summary.tasks.len(), row).into_any_element()
+                            step(ix + 1 == summary.tasks.len(), 2., row).into_any_element()
                         }
                     })),
             )
@@ -1019,10 +1022,10 @@ mod tests {
     ) {
         let (window, _, lead) = crate::shell::tests::window(cx);
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
-        let (child, other, worker) = window
+        let (child, sibling, other, worker) = window
             .update(cx, |shell, _, cx| {
                 let mut ids = Vec::new();
-                for _ in 0..3 {
+                for _ in 0..4 {
                     let summary = locked(&shell.store)
                         .unwrap()
                         .create("codex", &shell.workspace.project)
@@ -1034,7 +1037,9 @@ mod tests {
                     shell.sessions[&id].update(cx, |s, _| s.summary.has_messages = true);
                 }
                 let (child, other, worker) = (ids[0], ids[1], ids[2]);
+                let sibling = ids[3];
                 shell.started_by.insert(child, lead);
+                shell.started_by.insert(sibling, lead);
                 shell.orchestration_summaries.insert(
                     other,
                     monocode_core::orchestration::Summary {
@@ -1051,14 +1056,21 @@ mod tests {
                 shell.selected_sessions.clear();
                 shell.workspace.active = Some(lead);
                 shell.invalidate_chrome(cx);
-                (child, other, worker)
+                (child, sibling, other, worker)
             })
             .unwrap();
         settle(window, cx);
         let head = bounds(cx, format!("sidebar-session-{lead}")).expect("the thread is listed");
         let nested =
             bounds(cx, format!("sidebar-session-{child}")).expect("its session hangs below");
-        assert!(nested.top() >= head.bottom(), "under its caller");
+        let sibling = bounds(cx, format!("sidebar-session-{sibling}")).unwrap();
+        let (first, second) = if nested.top() < sibling.top() {
+            (nested, sibling)
+        } else {
+            (sibling, nested)
+        };
+        assert_eq!(first.top(), head.bottom(), "no gap under the caller");
+        assert_eq!(second.top(), first.bottom(), "nested sessions have no gap");
         assert!(nested.left() > head.left(), "on the rail, inset");
         assert_eq!(nested.size.height, px(28.));
         assert!(

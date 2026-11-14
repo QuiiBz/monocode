@@ -1225,10 +1225,10 @@ impl Monos {
         .detach();
     }
     pub(crate) fn rail(&mut self, project: Option<String>, cx: &mut Context<Self>) -> AnyElement {
-        self.rail_impl(project.clone(), false, false, project, cx)
+        self.rail_impl(project.clone(), false, false, false, project, cx)
     }
     pub(crate) fn focused_rail(&mut self, project: String, cx: &mut Context<Self>) -> AnyElement {
-        self.rail_impl(None, false, false, Some(project), cx)
+        self.rail_impl(None, false, false, true, Some(project), cx)
     }
     /// Original navigation lists every Mono before the projects.
     pub(crate) fn project_navigation_rail(
@@ -1236,13 +1236,14 @@ impl Monos {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.rail_impl(None, true, compact, None, cx)
+        self.rail_impl(None, true, compact, false, None, cx)
     }
     fn rail_impl(
         &mut self,
         project: Option<String>,
         original: bool,
         compact: bool,
+        focused: bool,
         add_project: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1329,6 +1330,7 @@ impl Monos {
                         .gap_2()
                         .text_size(px(14.))
                         .text_color(content(0.5))
+                        .when(focused, |d| sidebar_row_text(d, false))
                         .hover(|s| s.bg(content(0.1)).text_color(content(1.)))
                         .child(icon("plus", 16.))
                         .child("New mono")
@@ -1395,9 +1397,12 @@ impl Monos {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .opacity(if active { 1. } else { 0.65 })
+                    .when(!focused, |d| d.opacity(if active { 1. } else { 0.65 }))
                     .when(active, |d| d.bg(content(0.1)))
-                    .hover(|s| s.bg(content(0.08)).opacity(1.))
+                    .hover(|s| {
+                        let style = s.bg(content(0.08));
+                        if focused { style } else { style.opacity(1.) }
+                    })
                     .child(
                         div()
                             .size(px(16.))
@@ -1436,9 +1441,17 @@ impl Monos {
                                 .min_w_0()
                                 .truncate()
                                 .when(unread > 0, |d| d.pr(px(24.)))
-                                .group_hover("mono-rail-row", |s| s.pr(px(24.)))
+                                .group_hover("mono-rail-row", |s| {
+                                    let style = s.pr(px(24.));
+                                    if focused {
+                                        style.text_color(content(1.))
+                                    } else {
+                                        style
+                                    }
+                                })
                                 .text_size(px(14.))
                                 .font_weight(gpui::FontWeight::MEDIUM)
+                                .when(focused, |d| sidebar_row_text(d, active))
                                 .child(mono.label()),
                         )
                     })

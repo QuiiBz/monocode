@@ -1317,8 +1317,9 @@ impl Shell {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::MEDIUM)
+                    .map(|d| sidebar_row_text(d, false))
+                    .when(expanded, |d| d.text_color(content(0.8)))
+                    .group_hover(group.clone(), |s| s.text_color(content(1.)))
                     .child(name),
             )
             .child(

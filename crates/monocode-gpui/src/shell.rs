@@ -6368,13 +6368,7 @@ impl Shell {
             .flex_1()
             .min_w_0()
             .h(px(20.))
-            .when(nested, |d| {
-                d.text_size(px(13.))
-                    .text_color(content(if active { 1. } else { 0.55 }))
-                    .when(!active, |d| {
-                        d.group_hover("session-row", |s| s.text_color(content(0.8)))
-                    })
-            })
+            .when(nested, |d| d.text_size(px(13.)))
             .when(!nested && compact, |d| {
                 d.text_size(px(14.))
                     .font_weight(FontWeight::MEDIUM)
@@ -6384,6 +6378,11 @@ impl Shell {
                 d.text_size(px(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(content(1.))
+            })
+            .when(!self.workspace.classic_layout, |d| {
+                sidebar_row_text(d, active || self.session_hover == Some(id))
+                    .when(nested, |d| d.text_size(px(13.)))
+                    .group_hover("session-row", |s| s.text_color(content(1.)))
             })
             .child(crate::particle_text::particle_text(session.display_title()));
         let badges = div()
@@ -9780,7 +9779,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_rows_have_a_gap_and_preview_survives_crossing_into_the_card(
+    fn sidebar_rows_have_no_gap_and_preview_survives_crossing_into_the_card(
         cx: &mut TestAppContext,
     ) {
         let (window, a, b) = window(cx);
@@ -9805,8 +9804,8 @@ mod tests {
         assert_eq!(first.size.height, px(32.));
         assert_eq!(
             second.top() - first.bottom(),
-            px(1.),
-            "rows retain their 1px gap"
+            px(0.),
+            "session rows have no gap"
         );
         let move_to = |position, cx: &mut TestAppContext| {
             cx.update_window(window.into(), |_, window, cx| {
@@ -9863,7 +9862,7 @@ mod tests {
             .update(cx, |shell, window, cx| {
                 let preview = shell.session_preview.as_ref().unwrap();
                 assert_eq!(preview.id, a, "another row replaces the old preview");
-                assert_eq!(preview.anchor.get().unwrap().top() - first.bottom(), px(1.));
+                assert_eq!(preview.anchor.get().unwrap().top(), first.bottom());
                 shell.open(a, window, cx);
                 assert!(
                     shell.session_preview.is_none(),

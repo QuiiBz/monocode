@@ -234,6 +234,13 @@ pub(crate) fn content(alpha: f32) -> Hsla {
     color
 }
 
+pub(crate) fn sidebar_row_text<T: Styled>(element: T, emphasized: bool) -> T {
+    element
+        .text_size(px(14.))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(content(if emphasized { 1. } else { 0.5 }))
+}
+
 /// `[data-composer-box]::before` uses content ink at 3% over its backdrop.
 /// Light mode instead gives the box the solid `background-base` surface.
 pub(crate) fn composer_fill() -> Hsla {
