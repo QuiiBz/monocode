@@ -756,6 +756,14 @@ impl ReviewPane {
             }
         }
     }
+    fn cycle(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sources.is_empty() {
+            let next = (self.state.active as isize + step).rem_euclid(self.sources.len() as isize)
+                as usize;
+            self.select(next, cx);
+        }
+        self.focus_active(window, cx);
+    }
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.sources.len() && ix != self.state.active {
             self.remember_body_focus(cx);
@@ -1853,6 +1861,14 @@ impl Render for ReviewPane {
         div()
             .id("review-pane")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &crate::shell::NextTab, window, cx| {
+                this.cycle(1, window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::shell::PreviousTab, window, cx| {
+                    this.cycle(-1, window, cx);
+                }),
+            )
             .relative()
             .size_full()
             .min_h_0()

@@ -4393,6 +4393,15 @@ impl Shell {
         }
     }
     fn cycle(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.app_view_open()
+            && self.dock_open(cx)
+            && let Some(current) = self.dock_focused(window, cx)
+        {
+            let count = self.terminals[&self.workspace.project].len();
+            let next = (current as isize + step).rem_euclid(count as isize) as usize;
+            self.select_terminal(next, window, cx);
+            return;
+        }
         let tabs = self.visible_tabs(cx);
         if tabs.is_empty() {
             return;
@@ -12254,6 +12263,115 @@ mod tests {
     }
 
     #[gpui::test]
+    fn focused_review_tabs_cycle_without_changing_chat(cx: &mut TestAppContext) {
+        let (window, other, active) = same_project_window(cx);
+        cx.update(|cx| {
+            input::bind(cx);
+            bind_keys(cx);
+            cx.set_reduce_motion(true);
+        });
+        let directory = std::env::temp_dir().join(format!("monocode-tab-focus-{}", active));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("focus.rs");
+        std::fs::write(&path, "fn main() {}\n").unwrap();
+        window
+            .update(cx, |shell, window, cx| {
+                shell.open(active, window, cx);
+                shell.open_review(
+                    crate::review::ReviewTab::File {
+                        cwd: directory.to_string_lossy().into_owned(),
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                    window,
+                    cx,
+                );
+                shell.open_review(
+                    crate::review::ReviewTab::Changes {
+                        cwd: directory.to_string_lossy().into_owned(),
+                        path: None,
+                        staged: None,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        for (keys, expected) in [
+            ("ctrl-tab", 0),
+            ("ctrl-shift-tab", 1),
+            ("ctrl-tab", 0),
+            ("ctrl-tab", 1),
+        ] {
+            visual.simulate_keystrokes(keys);
+            visual.run_until_parked();
+            window
+                .update(visual, |shell, window, cx| {
+                    assert_eq!(shell.workspace.active, Some(active));
+                    let review = shell.reviews[&active].read(cx);
+                    assert_eq!(review.state.active, expected);
+                    if let Some(editor) = review.active_editor() {
+                        assert!(editor.focus_handle(cx).contains_focused(window, cx));
+                    }
+                })
+                .unwrap();
+        }
+        window
+            .update(visual, |shell, window, cx| {
+                shell.reviews[&active].update(cx, |review, cx| review.close_active(cx));
+                shell.reviews[&active].update(cx, |review, cx| review.focus_active(window, cx));
+            })
+            .unwrap();
+        visual.run_until_parked();
+        for keys in ["ctrl-tab", "ctrl-shift-tab"] {
+            visual.simulate_keystrokes(keys);
+            visual.run_until_parked();
+            window
+                .update(visual, |shell, _, cx| {
+                    assert_eq!(shell.workspace.active, Some(active));
+                    assert_eq!(shell.reviews[&active].read(cx).state.active, 0);
+                })
+                .unwrap();
+        }
+        window
+            .update(visual, |shell, window, cx| {
+                shell.workspace.split(other, SplitDir::Right);
+                shell.open_review(
+                    crate::review::ReviewTab::Changes {
+                        cwd: directory.to_string_lossy().into_owned(),
+                        path: None,
+                        staged: None,
+                    },
+                    window,
+                    cx,
+                );
+                shell.open_review(
+                    crate::review::ReviewTab::File {
+                        cwd: directory.to_string_lossy().into_owned(),
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        visual.run_until_parked();
+        for (keys, expected) in [("ctrl-tab", 0), ("ctrl-shift-tab", 1)] {
+            visual.simulate_keystrokes(keys);
+            visual.run_until_parked();
+            window
+                .update(visual, |shell, _, cx| {
+                    assert_eq!(shell.workspace.active, Some(other));
+                    assert_eq!(shell.reviews[&other].read(cx).state.active, expected);
+                    assert_eq!(shell.reviews[&active].read(cx).state.active, 0);
+                })
+                .unwrap();
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[gpui::test]
     fn tab_project_and_session_keys_follow_monocode(cx: &mut TestAppContext) {
         let (window, a, b) = same_project_window(cx);
         cx.update(|cx| {
@@ -12288,6 +12406,9 @@ mod tests {
         assert_eq!(active(cx), Some(b));
         keys("ctrl-tab".into(), cx);
         assert_eq!(active(cx), Some(a));
+
+        keys("ctrl-shift-tab".into(), cx);
+        assert_eq!(active(cx), Some(b));
 
         // An empty composer hands Cmd+Shift+Right to project navigation...
         let project = |cx: &mut TestAppContext| {
@@ -13618,6 +13739,16 @@ mod tests {
                 project
             })
             .unwrap();
+        for keys in ["ctrl-tab", "ctrl-shift-tab"] {
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, window, cx| {
+                    assert_eq!(shell.workspace.active, Some(b));
+                    assert_eq!(shell.dock_focused(window, cx), Some(0));
+                })
+                .unwrap();
+        }
         let dock = cx.debug_bounds("terminal-dock").unwrap();
         assert!((dock.size.height - px(220.)).abs() < px(2.));
         // ⌘T in the dock opens another terminal, not a session tab.
@@ -13633,6 +13764,23 @@ mod tests {
             })
             .unwrap();
         assert!(cx.debug_bounds("terminal-tab-1").is_some());
+        for (keys, expected) in [
+            ("ctrl-tab", 0),
+            ("ctrl-shift-tab", 1),
+            ("ctrl-tab", 0),
+            ("ctrl-shift-tab", 1),
+        ] {
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, window, cx| {
+                    assert_eq!(shell.workspace.active, Some(b));
+                    assert_eq!(shell.workspace.docks[&project].active, expected);
+                    assert_eq!(shell.dock_focused(window, cx), Some(expected));
+                })
+                .unwrap();
+        }
+
         window
             .update(cx, |shell, window, cx| shell.focus_active(window, cx))
             .unwrap();
