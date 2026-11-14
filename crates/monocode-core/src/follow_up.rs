@@ -7,6 +7,8 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Message {
     pub id: String,
+    #[serde(default = "legacy_submission_is_programmatic")]
+    pub programmatic: bool,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<u64>,
@@ -20,6 +22,10 @@ pub struct Message {
     pub error: Option<String>,
     pub steer: bool,
 }
+fn legacy_submission_is_programmatic() -> bool {
+    true
+}
+
 impl Message {
     pub fn label(&self) -> String {
         if self.text.trim().is_empty() {
@@ -173,6 +179,21 @@ mod tests {
     use super::*;
     use crate::{store::Store, transcript::Transcript};
     #[test]
+    fn submission_origin_survives_queue_restore() {
+        for programmatic in [false, true] {
+            let message = Message {
+                programmatic,
+                ..Default::default()
+            };
+            let restored: Message =
+                serde_json::from_str(&serde_json::to_string(&message).unwrap()).unwrap();
+            assert_eq!(restored.programmatic, programmatic);
+        }
+        let restored: Message = serde_json::from_str("{}").unwrap();
+        assert!(restored.programmatic);
+    }
+
+    #[test]
     fn prepared_context_is_durable_without_changing_the_visible_message() {
         let mut message = Message {
             text: "Use @mcp/docs".into(),
@@ -200,9 +221,11 @@ mod tests {
             prepared_prompt: Some("MCP context: transport only".into()),
             ..Default::default()
         };
-        assert!(!serde_json::to_string(&settings)
-            .unwrap()
-            .contains("transport only"));
+        assert!(
+            !serde_json::to_string(&settings)
+                .unwrap()
+                .contains("transport only")
+        );
     }
     #[test]
     fn recovery_preserves_attachments_and_edits_but_never_replays_delivered_messages() {

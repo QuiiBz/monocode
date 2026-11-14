@@ -4,6 +4,20 @@ use super::*;
 use crate::notifications::approvals::{InputKind, PendingInput};
 
 impl Conversation {
+    pub(crate) fn notification_manual_turn(&self) -> bool {
+        self.notification_manual_turn
+    }
+    pub(crate) fn notification_has_reply(&self, cx: &gpui::App) -> bool {
+        let transcript = self.transcript.read(cx);
+        transcript.active_turn().is_some_and(|start| {
+            transcript.source_rows()[start..]
+                .iter()
+                .any(|row| row.role == "assistant" && !row.text.trim().is_empty())
+        })
+    }
+    pub(crate) fn notification_succeeded(&self) -> bool {
+        !self.busy && !self.notification_cancelled && self.status == "Ready"
+    }
     pub(crate) fn notification_was_cancelled(&self) -> bool {
         self.notification_cancelled
     }
@@ -87,5 +101,51 @@ impl Conversation {
         cx.emit(SessionChanged);
         cx.notify();
         true
+    }
+}
+
+#[cfg(test)]
+impl Conversation {
+    pub(crate) fn notification_test_queue_transfer(
+        &mut self,
+        programmatic: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.loaded = true;
+        self.busy = false;
+        self.summary.provider = "fixture".into();
+        self.settings.pending_provider_switch = Some(monocode_core::agent::ProviderSwitch {
+            from: "fixture".into(),
+            ..Default::default()
+        });
+        if programmatic {
+            self.install_transfer(self.settings.clone(), Some("Delegated request".into()), cx);
+        } else {
+            self.input
+                .update(cx, |input, cx| input.set_text("Human request".into(), cx));
+            self.send(cx);
+        }
+        self.account_switching = true;
+    }
+    pub(crate) fn notification_test_launch_transfer(&mut self, cx: &mut Context<Self>) {
+        self.account_switching = false;
+        let message = self.follow_ups.state.messages.remove(0);
+        self.launch_message(message, cx);
+    }
+    pub(crate) fn notification_test_finish(&mut self) {
+        self.busy = false;
+        self.status = "Ready".into();
+    }
+    pub(crate) fn notification_test_status(&mut self, status: &str) {
+        self.status = status.into();
+    }
+    pub(crate) fn notification_test_begin(&mut self, cx: &mut Context<Self>) {
+        self.begin_turn(cx);
+    }
+    pub(crate) fn notification_test_turn(&mut self, busy: bool, manual: bool, cancelled: bool) {
+        self.busy = busy;
+        self.notification_manual_turn = manual;
+        self.notification_cancelled = cancelled;
+        self.status = "Ready".into();
     }
 }

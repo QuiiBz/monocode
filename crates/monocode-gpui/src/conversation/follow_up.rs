@@ -120,8 +120,19 @@ impl Conversation {
         invert: bool,
         cx: &mut Context<Self>,
     ) {
+        self.enqueue_follow_up_with_origin(prompt, mode, invert, false, cx);
+    }
+    pub(super) fn enqueue_follow_up_with_origin(
+        &mut self,
+        prompt: String,
+        mode: Option<String>,
+        invert: bool,
+        programmatic: bool,
+        cx: &mut Context<Self>,
+    ) {
         let attachments = std::mem::take(&mut self.attachments);
         let mut message = self.message(prompt, attachments, mode, cx);
+        message.programmatic = programmatic;
         message.steer = message.can_steer() && self.steers_follow_up(invert, cx);
         if invert && self.busy && message.steer {
             self.follow_ups.requested = Some(message.id.clone());
@@ -200,12 +211,23 @@ impl Conversation {
         cx.emit(SessionChanged);
     }
     pub(super) fn draft_action(&mut self, send: bool, cx: &mut Context<Self>) {
+        self.draft_action_with_origin(send, false, cx);
+    }
+    pub(super) fn draft_action_with_origin(
+        &mut self,
+        send: bool,
+        programmatic: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.is_remote() {
             self.remote_draft_action(send, cx);
             return;
         }
         if self.needs_history_restore() {
-            self.defer_history_action(move |this, cx| this.draft_action(send, cx), cx);
+            self.defer_history_action(
+                move |this, cx| this.draft_action_with_origin(send, programmatic, cx),
+                cx,
+            );
             return;
         }
         if send && (!self.loaded || self.preparing_worktree) {
@@ -215,6 +237,7 @@ impl Conversation {
             return;
         };
         if send {
+            message.programmatic = programmatic;
             message.steer = cx
                 .try_global::<crate::settings::Preferences>()
                 .is_none_or(|prefs| prefs.follow_up == "steer")
@@ -358,6 +381,7 @@ impl Conversation {
                     })
                     .is_ok()
                 {
+                    self.notification_manual_turn |= !message.programmatic;
                     self.follow_ups.sending = Some(message.id);
                 } else {
                     self.fail_follow_up(
@@ -402,7 +426,9 @@ impl Conversation {
         self.settings.attachments = message.attachments;
         let previous_prepared = self.settings.prepared_prompt.take();
         self.settings.prepared_prompt = message.prepared_prompt;
+        let manual = !message.programmatic;
         self.launch_prompt(message.text, cx);
+        self.notification_manual_turn = manual;
         self.settings.prepared_prompt = previous_prepared;
         self.attachments = composer_attachments;
         self.settings.attachments.clear();

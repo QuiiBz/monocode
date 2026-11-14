@@ -128,12 +128,13 @@ impl Shell {
         }
         let ended = self.notification_state.responding.remove(&id) && !chat.busy;
         if !ended
-            || chat.notification_was_cancelled()
+            || !chat.notification_succeeded()
             || chat.summary.archived
-            || self
-                .monos
-                .as_ref()
-                .is_some_and(|monos| monos.read(cx).is_mono_session(id))
+            || self.monos.as_ref().is_some_and(|monos| {
+                monos.read(cx).is_mono_session(id)
+                    && (monos.read(cx).notification_main_session(id)
+                        || !chat.notification_manual_turn())
+            })
         {
             // Ended with no finish to send, as when stopped.
             if ended {
@@ -282,13 +283,24 @@ impl Shell {
             self.observations.push(cx.subscribe(
                 &monos,
                 |this, _, event: &crate::monos::NotificationPosted, cx| {
-                    this.notify_mobile_post(event.session, &event.body, cx)
+                    this.notify_mobile_post(event.session, &event.body, cx);
+                    if let Some(view) = this.notification_chat(event.session, cx) {
+                        let summary = view.read(cx).summary.clone();
+                        this.dispatch_notice(
+                            &summary,
+                            "agentFinished",
+                            Target::Session(event.session),
+                            &event.body,
+                            Some(crate::sound::Cue::Finished),
+                            cx,
+                        );
+                    }
                 },
             ));
             self.observations.push(cx.subscribe(
                 &monos,
                 |this, _, event: &crate::monos::NotificationFinished, cx| {
-                    if !event.was_cancelled && !event.habit && !event.summary.archived {
+                    if event.succeeded && !event.habit && !event.summary.archived {
                         this.deliver_session_notice(
                             &event.summary,
                             "agentFinished",
@@ -489,13 +501,14 @@ impl Shell {
             if chat.responding() {
                 self.notification_state.responding.insert(id);
             } else if self.notification_state.responding.remove(&id) && !chat.busy {
-                if !chat.notification_was_cancelled()
+                if chat.notification_succeeded()
                     && !chat.summary.archived
                     && self.sessions.contains_key(&id)
-                    && !self
-                        .monos
-                        .as_ref()
-                        .is_some_and(|monos| monos.read(cx).is_mono_session(id))
+                    && !self.monos.as_ref().is_some_and(|monos| {
+                        monos.read(cx).is_mono_session(id)
+                            && (monos.read(cx).notification_main_session(id)
+                                || !chat.notification_manual_turn())
+                    })
                 {
                     completed.push((chat.summary.clone(), chat.notification_reply_body(cx)));
                 } else {
@@ -605,6 +618,31 @@ impl Shell {
         });
     }
 
+    fn completion_sound_allowed(&self, id: i64, cx: &App) -> bool {
+        let monos = self.monos.as_ref().map(|monos| monos.read(cx));
+        let mut ancestor = id;
+        let mut visited = HashSet::new();
+        let mut started_by_mono = false;
+        while visited.insert(ancestor) {
+            if monos.is_some_and(|monos| monos.started_notification_session(ancestor)) {
+                started_by_mono = true;
+                break;
+            }
+            let Some(parent) = self.started_by.get(&ancestor) else {
+                break;
+            };
+            if monos.is_some_and(|monos| monos.is_mono_session(*parent)) {
+                started_by_mono = true;
+                break;
+            }
+            ancestor = *parent;
+        }
+        !started_by_mono
+            || self
+                .notification_chat(id, cx)
+                .is_some_and(|view| view.read(cx).notification_manual_turn())
+    }
+
     pub(super) fn deliver_session_notice(
         &mut self,
         summary: &Session,
@@ -613,6 +651,11 @@ impl Shell {
         cue: Option<crate::sound::Cue>,
         cx: &mut Context<Self>,
     ) {
+        let cue = if category == "agentFinished" && !self.completion_sound_allowed(summary.id, cx) {
+            None
+        } else {
+            cue
+        };
         self.notify_mobile(summary, category, body, cx);
         self.dispatch_notice(
             summary,
@@ -655,7 +698,14 @@ impl Shell {
             Target::Reminder { due_at, .. } => due_at,
         };
         let prefs = &self.workspace.preferences;
-        if !prefs.allows_project_notification(&summary.cwd, category, Some(occurred), now) {
+        let unscoped_mono = prefs.known_notification_project_id(&summary.cwd).is_none()
+            && self
+                .monos
+                .as_ref()
+                .is_some_and(|monos| monos.read(cx).notification_main_session(summary.id));
+        if !unscoped_mono
+            && !prefs.allows_project_notification(&summary.cwd, category, Some(occurred), now)
+        {
             return;
         }
         let notify = delivery::should_notify(
@@ -687,7 +737,7 @@ impl Shell {
                 summary.title.clone()
             },
             body: delivery::clip_body(&body),
-            sound: prefs.sounds,
+            sound: prefs.sounds && (category != "agentFinished" || cue.is_some()),
         });
         let directory = summary.cwd.clone();
         let category = category.to_owned();
@@ -705,7 +755,13 @@ impl Shell {
                 if !accepted
                     && prefs.sounds
                     && occurred >= this.notification_state.sounds_enabled_at
-                    && prefs.allows_project_notification(&directory, &category, Some(occurred), now)
+                    && (unscoped_mono
+                        || prefs.allows_project_notification(
+                            &directory,
+                            &category,
+                            Some(occurred),
+                            now,
+                        ))
                     && let Some(cue) = cue
                 {
                     crate::sound::play(cue);
@@ -1366,6 +1422,181 @@ impl Shell {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+
+    #[gpui::test]
+    fn completion_sound_obeys_turn_state_preferences_and_duplicates(cx: &mut TestAppContext) {
+        let (window, session, _) = crate::shell::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.preferences.notifications = false;
+                shell.workspace.preferences.sounds = true;
+                crate::sound::PLAYED.with_borrow_mut(Vec::clear);
+                for (enabled, cancelled, expected) in
+                    [(true, false, 1), (false, false, 0), (true, true, 0)]
+                {
+                    shell.workspace.preferences.sounds = enabled;
+                    let view = shell.sessions[&session].clone();
+                    view.update(cx, |view, _| view.notification_test_turn(true, true, false));
+                    shell.notification_session_changed(session, cx);
+                    view.update(cx, |view, _| {
+                        view.notification_test_turn(false, true, cancelled)
+                    });
+                    shell.notification_session_changed(session, cx);
+                    shell.notification_session_changed(session, cx);
+                    crate::sound::PLAYED.with_borrow_mut(|played| {
+                        assert_eq!(played.len(), expected);
+                        played.clear();
+                    });
+                }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn completion_sound_skips_input_pauses_and_errors(cx: &mut TestAppContext) {
+        let (window, session, _) = crate::shell::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.preferences.notifications = false;
+                shell.workspace.preferences.sounds = true;
+                crate::sound::PLAYED.with_borrow_mut(Vec::clear);
+                let view = shell.sessions[&session].clone();
+                view.update(cx, |view, _| view.notification_test_turn(true, true, false));
+                shell.notification_session_changed(session, cx);
+                for status in ["Waiting for approval", "Waiting for your answer"] {
+                    view.update(cx, |view, _| view.notification_test_status(status));
+                    shell.notification_session_changed(session, cx);
+                }
+                view.update(cx, |view, _| {
+                    view.notification_test_turn(false, true, false);
+                    view.notification_test_status("Failed");
+                });
+                shell.notification_session_changed(session, cx);
+                crate::sound::PLAYED.with_borrow(|played| assert!(played.is_empty()));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn project_mute_blocks_completion_sound(cx: &mut TestAppContext) {
+        let (window, session, _) = crate::shell::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.preferences.notifications = false;
+                shell.workspace.preferences.sounds = true;
+                let summary = shell.sessions[&session].read(cx).summary.clone();
+                shell
+                    .workspace
+                    .preferences
+                    .mute_notification_project(&summary.cwd, None);
+                crate::sound::PLAYED.with_borrow_mut(Vec::clear);
+                shell.deliver_session_notice(
+                    &summary,
+                    "agentFinished",
+                    "Done",
+                    Some(crate::sound::Cue::Finished),
+                    cx,
+                );
+                crate::sound::PLAYED.with_borrow(|played| assert!(played.is_empty()));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn provider_transfer_queue_preserves_completion_sound_origin(cx: &mut TestAppContext) {
+        let (window, session, _) = crate::shell::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.preferences.notifications = false;
+                shell.workspace.preferences.sounds = true;
+                shell
+                    .mono_manager()
+                    .update(cx, |manager, _| manager.notification_test_mono(-200));
+                shell.started_by.insert(session, -200);
+            })
+            .unwrap();
+        for programmatic in [true, false, true] {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.sessions[&session].update(cx, |view, cx| {
+                        view.notification_test_queue_transfer(programmatic, cx)
+                    });
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |shell, _, cx| {
+                    let saved = locked(&shell.store).unwrap().follow_ups(session).unwrap();
+                    assert_eq!(saved.messages.last().unwrap().programmatic, programmatic);
+                    let view = shell.sessions[&session].clone();
+                    view.update(cx, |view, cx| view.notification_test_launch_transfer(cx));
+                    assert_eq!(shell.completion_sound_allowed(session, cx), !programmatic);
+                    crate::sound::PLAYED.with_borrow_mut(Vec::clear);
+                    shell.notification_session_changed(session, cx);
+                    view.update(cx, |view, _| view.notification_test_finish());
+                    shell.notification_session_changed(session, cx);
+                    shell.notification_session_changed(session, cx);
+                    crate::sound::PLAYED
+                        .with_borrow(|played| assert_eq!(played.len(), usize::from(!programmatic)));
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn mono_lineage_allows_only_the_human_turn(cx: &mut TestAppContext) {
+        let (window, session, _) = crate::shell::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let manager = shell.mono_manager();
+                let parent = -200;
+                manager.update(cx, |manager, _| {
+                    manager.notification_test_mono(parent);
+                    manager.notification_test_mono(-201);
+                });
+                shell.started_by.insert(-100, parent);
+                shell.started_by.insert(session, -100);
+                let view = shell.sessions[&session].clone();
+                for manual in [false, true, false] {
+                    view.update(cx, |view, _| {
+                        view.notification_test_turn(false, manual, false)
+                    });
+                    assert_eq!(shell.completion_sound_allowed(session, cx), manual);
+                }
+                view.update(cx, |view, cx| view.notification_test_begin(cx));
+                assert!(!shell.completion_sound_allowed(session, cx));
+                shell.started_by.clear();
+                assert!(shell.completion_sound_allowed(session, cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn completion_sound_plays_with_and_without_window_focus(cx: &mut TestAppContext) {
+        let (window, session, _) = crate::shell::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.preferences.notifications = false;
+                shell.workspace.preferences.sounds = true;
+                let summary = shell.sessions[&session].read(cx).summary.clone();
+                crate::sound::PLAYED.with_borrow_mut(Vec::clear);
+                for focused in [false, true] {
+                    shell.window_active = focused;
+                    shell.deliver_session_notice(
+                        &summary,
+                        "agentFinished",
+                        "Done",
+                        Some(crate::sound::Cue::Finished),
+                        cx,
+                    );
+                }
+                crate::sound::PLAYED.with_borrow(|played| {
+                    assert_eq!(played.as_slice(), &[crate::sound::Cue::Finished; 2]);
+                });
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn error_cards_share_top_right_stack_and_dismiss_independently(cx: &mut TestAppContext) {

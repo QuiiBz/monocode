@@ -10,7 +10,7 @@ pub(crate) struct NotificationFinished {
     pub summary: Session,
     pub body: String,
     pub habit: bool,
-    pub was_cancelled: bool,
+    pub succeeded: bool,
 }
 impl EventEmitter<NotificationFinished> for Monos {}
 
@@ -23,6 +23,18 @@ pub(crate) struct NotificationPosted {
 impl EventEmitter<NotificationPosted> for Monos {}
 
 impl Monos {
+    pub(crate) fn notification_main_session(&self, id: i64) -> bool {
+        self.roster
+            .monos
+            .iter()
+            .any(|mono| mono.session_id == Some(id))
+    }
+    pub(crate) fn started_notification_session(&self, id: i64) -> bool {
+        self.roster.monos.iter().any(|mono| {
+            mono.habit_sessions.contains(&id)
+                || mono.launches.iter().any(|launch| launch.session_id == id)
+        })
+    }
     pub(crate) fn dismiss_error(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.failed_reports.clear();
@@ -76,5 +88,13 @@ impl Monos {
         self.route = None;
         self.open(&mono, window, cx);
         true
+    }
+}
+
+#[cfg(test)]
+impl Monos {
+    pub(crate) fn notification_test_mono(&mut self, session: i64) {
+        let id = self.roster.create(Vec::new()).id.clone();
+        self.roster.get_mut(&id).unwrap().session_id = Some(session);
     }
 }
