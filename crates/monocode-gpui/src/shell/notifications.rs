@@ -52,8 +52,13 @@ impl State {
     pub(super) fn new(workspace: &Workspace, store: Database, cx: &mut Context<Shell>) -> Self {
         Self {
             region: AnchorSlot::default(),
-            harness: cx
-                .new(|cx| HarnessUpdates::new(workspace.preferences.hidden_providers.clone(), cx)),
+            harness: cx.new(|cx| {
+                HarnessUpdates::new(
+                    workspace.preferences.hidden_providers.clone(),
+                    workspace.preferences.automatic_harness_update_checks,
+                    cx,
+                )
+            }),
             approvals: cx.new(|_| ApprovalNotices::default()),
             reminders: cx.new(|_| reminders::View::default()),
             layout: cx.new(|_| {

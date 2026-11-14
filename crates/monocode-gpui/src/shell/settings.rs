@@ -363,6 +363,14 @@ impl Shell {
         .detach();
     }
     pub(super) fn apply_preferences(&mut self, cx: &mut Context<Self>) {
+        let preferences = &self.workspace.preferences;
+        self.notification_state.harness.update(cx, |notice, cx| {
+            notice.set_automatic(
+                preferences.automatic_harness_update_checks,
+                preferences.hidden_providers.clone(),
+                cx,
+            );
+        });
         self.refresh_notification_permission();
         self.configure_quick_composer(cx);
         // Switching search styles closes an open search of the other style.

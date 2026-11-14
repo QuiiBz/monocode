@@ -76,13 +76,25 @@ pub fn latest_version(kind: Kind) -> Result<String, String> {
 }
 /// Hidden and unresolved providers are excluded; failures are deliberately silent.
 pub fn find_updates(hidden: &[String]) -> Vec<Update> {
+    find_updates_while(hidden, || true)
+}
+
+/// Stop new probes after cancellation; requests already sent may finish.
+pub fn find_updates_while(hidden: &[String], active: impl Fn() -> bool + Sync) -> Vec<Update> {
     std::thread::scope(|scope| {
         let jobs = Kind::ALL
             .into_iter()
             .filter(|k| package(*k).is_some() && !hidden.iter().any(|id| id == k.id()))
             .map(|harness| {
+                let active = &active;
                 scope.spawn(move || {
+                    if !active() {
+                        return None;
+                    }
                     let installed = installed(harness).ok()?;
+                    if !active() {
+                        return None;
+                    }
                     let latest = latest_version(harness).ok()?;
                     (compare_versions(&latest, &installed).is_gt()).then_some(Update {
                         harness,

@@ -81,6 +81,7 @@ pub(crate) struct Preferences {
     pub show_remaining_usage: bool,
     pub mask_emails: bool,
     pub idle_agents: u32,
+    pub automatic_harness_update_checks: bool,
     pub claude_hooks: bool,
     /// Experimental: report Monocode instead of `sdk-cli` as Claude's entrypoint.
     pub claude_entrypoint: bool,
@@ -174,6 +175,7 @@ impl Default for Preferences {
             show_remaining_usage: false,
             mask_emails: true,
             idle_agents: 3,
+            automatic_harness_update_checks: true,
             claude_hooks: true,
             claude_entrypoint: false,
             binary_paths: HashMap::new(),
@@ -378,6 +380,25 @@ mod typography_tests {
         }
         for size in [8., 12.5, 32.] {
             assert_eq!(valid_font_size(size, 13.), size);
+        }
+    }
+}
+
+#[cfg(test)]
+mod harness_update_tests {
+    use super::Preferences;
+
+    #[test]
+    fn automatic_harness_checks_default_and_persist() {
+        assert!(Preferences::default().automatic_harness_update_checks);
+        let mut preferences: Preferences = serde_json::from_str(r#"{"idle_agents":1}"#).unwrap();
+        assert!(preferences.automatic_harness_update_checks);
+        for enabled in [false, true] {
+            preferences.automatic_harness_update_checks = enabled;
+            let saved = serde_json::to_string(&preferences).unwrap();
+            let restored: Preferences = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.automatic_harness_update_checks, enabled);
+            assert_eq!(restored.idle_agents, 1);
         }
     }
 }
