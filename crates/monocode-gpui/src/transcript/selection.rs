@@ -113,7 +113,6 @@ impl Selection {
         start.min(end)..end
     }
 }
-const MENU_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 /// The top centre of the selection's first line, as React anchors to the
 /// range's first client rect rather than the pointer.
 fn menu_anchor(state: &State) -> Option<Point<Pixels>> {
@@ -471,28 +470,11 @@ impl TranscriptView {
             return;
         }
         state.menu = None;
-        let (anchor, head) = (state.anchor, state.head);
+        if state.anchor != state.head {
+            state.menu = Some(menu_anchor(&state).unwrap_or(event.position));
+        }
         drop(state);
         cx.notify();
-        if anchor == head {
-            return;
-        }
-        // Wait out a quick select-and-go before offering the menu, and drop
-        // it if the selection moved on in the meantime.
-        let fallback = event.position;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(MENU_DELAY).await;
-            let _ = this.update(cx, |this, cx| {
-                let mut state = this.selection.0.borrow_mut();
-                if state.drag.is_some() || state.anchor != anchor || state.head != head {
-                    return;
-                }
-                state.menu = Some(menu_anchor(&state).unwrap_or(fallback));
-                drop(state);
-                cx.notify();
-            });
-        })
-        .detach();
     }
     pub(super) fn selected_text(&self) -> Option<String> {
         let state = self.selection.0.borrow();
