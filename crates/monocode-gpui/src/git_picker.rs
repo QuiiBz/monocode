@@ -20,6 +20,95 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
+    fn branch_and_base_choices_only_include_local_branches(cx: &mut TestAppContext) {
+        for mode in [Mode::Branch, Mode::Base] {
+            let picker = cx.new(|cx| {
+                GitPicker::new(
+                    "/nonexistent/local-branch-picker".into(),
+                    mode,
+                    Some("main".into()),
+                    cx,
+                )
+            });
+            picker.update(cx, |view, cx| {
+                view.state = Some(Snapshot {
+                    current: Some("main".into()),
+                    branches: [
+                        ("main", None),
+                        ("main", Some("origin")),
+                        ("main", Some("upstream")),
+                        ("native/task", Some("origin")),
+                        ("native/task", None),
+                        ("tracking", None),
+                        ("tracking", Some("origin")),
+                        ("backup/main", None),
+                        ("remote-only", Some("upstream")),
+                        ("HEAD", Some("origin")),
+                    ]
+                    .into_iter()
+                    .map(|(name, remote)| git::Branch {
+                        name: name.into(),
+                        remote: remote.map(str::to_owned),
+                    })
+                    .collect(),
+                    ..Default::default()
+                });
+                let local_names: Vec<_> = view
+                    .choices(cx)
+                    .into_iter()
+                    .map(|choice| {
+                        let Choice::Branch(branch) = choice else {
+                            panic!("Expected a local branch")
+                        };
+                        assert!(branch.remote.is_none());
+                        branch.name
+                    })
+                    .collect();
+                assert_eq!(
+                    local_names,
+                    ["main", "native/task", "tracking", "backup/main"]
+                );
+                for (query, expected_names, can_create) in [
+                    (" main ", vec!["main", "backup/main"], false),
+                    ("NATIVE/", vec!["native/task"], true),
+                    ("tracking", vec!["tracking"], false),
+                    ("remote-only", vec![], true),
+                    ("origin", vec![], true),
+                    ("new/branch", vec![], true),
+                ] {
+                    view.search
+                        .update(cx, |search, cx| search.set_text(query.into(), cx));
+                    let choices = view.choices(cx);
+                    let branch_names: Vec<_> = choices
+                        .iter()
+                        .filter_map(|choice| match choice {
+                            Choice::Branch(branch) => Some(branch.name.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(branch_names, expected_names);
+                    let created_name = choices.iter().find_map(|choice| match choice {
+                        Choice::Create(name) => Some(name.as_str()),
+                        _ => None,
+                    });
+                    assert_eq!(
+                        created_name,
+                        (mode == Mode::Branch && can_create).then_some(query.trim())
+                    );
+                }
+                view.search
+                    .update(cx, |search, cx| search.set_text(String::new(), cx));
+                view.step(100, cx);
+                assert_eq!(view.active, 3);
+                view.step(-100, cx);
+                assert_eq!(view.active, 0);
+                view.pick(0, cx);
+                assert!(!view.busy, "The current branch does not start a checkout");
+            });
+        }
+    }
+
+    #[gpui::test]
     fn all_picker_modes_start_with_cached_choices_and_keep_them_after_refresh_failure(
         cx: &mut TestAppContext,
     ) {
@@ -197,11 +286,8 @@ impl GitPicker {
         let mut choices: Vec<_> = state
             .branches
             .iter()
-            .filter(|branch| {
-                format!("{} {}", branch.name, branch.remote.as_deref().unwrap_or(""))
-                    .to_lowercase()
-                    .contains(&needle)
-            })
+            .filter(|branch| branch.remote.is_none())
+            .filter(|branch| branch.name.to_lowercase().contains(&needle))
             .cloned()
             .map(Choice::Branch)
             .collect();

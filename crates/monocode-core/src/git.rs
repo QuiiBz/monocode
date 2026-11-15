@@ -200,20 +200,24 @@ pub fn snapshot(cwd: &Path) -> Result<Snapshot, String> {
         &[
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname)",
+            "--format=%(refname)%09%(symref)",
             "refs/heads/",
             "refs/remotes/",
         ],
     )?
     .lines()
     .filter_map(|line| {
-        if let Some(name) = line.strip_prefix("refs/heads/") {
+        let (reference, symbolic_target) = line.split_once('\t')?;
+        if !symbolic_target.is_empty() {
+            return None;
+        }
+        if let Some(name) = reference.strip_prefix("refs/heads/") {
             Some(Branch {
                 name: name.into(),
                 remote: None,
             })
         } else {
-            let (remote, name) = line.strip_prefix("refs/remotes/")?.split_once('/')?;
+            let (remote, name) = reference.strip_prefix("refs/remotes/")?.split_once('/')?;
             (name != "HEAD").then(|| Branch {
                 name: name.into(),
                 remote: Some(remote.into()),
@@ -437,6 +441,93 @@ pub fn create_project_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_keeps_local_and_remote_branches_but_excludes_symbolic_refs() {
+        let repository = tempfile::tempdir().unwrap();
+        let cwd = repository.path();
+        git(cwd, &["init", "-b", "main"]).unwrap();
+        git(
+            cwd,
+            &[
+                "-c",
+                "user.name=Native test",
+                "-c",
+                "user.email=native@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        )
+        .unwrap();
+        for reference in [
+            "refs/heads/native/task",
+            "refs/heads/backup/main",
+            "refs/heads/tracking",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/native/task",
+            "refs/remotes/origin/tracking",
+            "refs/remotes/upstream/main",
+            "refs/remotes/upstream/remote-only",
+        ] {
+            git(cwd, &["update-ref", reference, "HEAD"]).unwrap();
+        }
+        git(cwd, &["remote", "add", "origin", "/unused"]).unwrap();
+        git(
+            cwd,
+            &["branch", "--set-upstream-to=origin/tracking", "tracking"],
+        )
+        .unwrap();
+        for (reference, target) in [
+            ("refs/remotes/origin/HEAD", "refs/remotes/origin/main"),
+            ("refs/remotes/upstream/HEAD", "refs/remotes/upstream/main"),
+            ("refs/remotes/origin/alias", "refs/remotes/origin/main"),
+            ("refs/heads/alias", "refs/heads/main"),
+        ] {
+            git(cwd, &["symbolic-ref", reference, target]).unwrap();
+        }
+        let state = snapshot(cwd).unwrap();
+        assert_eq!(state.current.as_deref(), Some("main"));
+        let mut local_names: Vec<_> = state
+            .branches
+            .iter()
+            .filter(|branch| branch.remote.is_none())
+            .map(|branch| branch.name.as_str())
+            .collect();
+        local_names.sort_unstable();
+        assert_eq!(
+            local_names,
+            ["backup/main", "main", "native/task", "tracking"]
+        );
+        assert_eq!(state.branches.len(), 9);
+        assert!(state.branches.iter().any(|branch| {
+            branch.name == "remote-only" && branch.remote.as_deref() == Some("upstream")
+        }));
+        create_branch(cwd, "remote-only").unwrap();
+        let state = snapshot(cwd).unwrap();
+        assert_eq!(state.current.as_deref(), Some("remote-only"));
+        assert!(state
+            .branches
+            .iter()
+            .any(|branch| { branch.name == "remote-only" && branch.remote.is_none() }));
+        checkout(
+            cwd,
+            &Branch {
+                name: "tracking".into(),
+                remote: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot(cwd).unwrap().current.as_deref(), Some("tracking"));
+        assert_eq!(
+            git(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+                .unwrap()
+                .trim(),
+            "origin/tracking"
+        );
+    }
     #[test]
     fn uncommitted_only_checks_the_sessions_paths_staged_or_unstaged() {
         let temp = tempfile::tempdir().unwrap();
