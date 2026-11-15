@@ -87,6 +87,7 @@ impl Element for Disclosure {
 }
 
 pub(crate) const WORD_FADE: Duration = Duration::from_millis(320);
+#[derive(Clone)]
 struct FadeGroup {
     words: Range<usize>,
     born: Instant,
@@ -96,7 +97,7 @@ struct FadeGroup {
 
 /// Only the short, still-fading suffix needs timing data. Words committed
 /// together share a timestamp and one easing calculation per frame.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct WordFades {
     groups: VecDeque<FadeGroup>,
     words: usize,

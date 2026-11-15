@@ -1,5 +1,8 @@
 //! GPUI port of AgentMarkdown.tsx and its .agent-markdown CSS.
 mod cache;
+mod flow;
+#[cfg(test)]
+mod flow_tests;
 pub(crate) mod mermaid;
 mod search;
 use crate::markdown_model::{Block, InlineRun, TableAlign};
@@ -386,6 +389,7 @@ fn inline_selected(
     font_size: f32,
     selection: Option<TextSelection>,
     prepared: Option<&cache::PreparedInline>,
+    fade_background: bool,
 ) -> AnyElement {
     if runs.iter().any(|r| r.style.code) {
         return rich_inline(runs, id, tone, fade, now, word_base, font_size, selection);
@@ -430,6 +434,9 @@ fn inline_selected(
                 if let Some(word) = word {
                     let alpha = fade.map_or(1., |fade| fade.opacity(word_base + *word));
                     highlight.fade_out = Some(1. - (1. - highlight.fade_out.unwrap_or(0.)) * alpha);
+                    if fade_background && let Some(background) = &mut highlight.background_color {
+                        background.a *= alpha;
+                    }
                 }
                 highlights.push((range.clone(), highlight));
             }
@@ -440,10 +447,14 @@ fn inline_selected(
     let text = prepared.text.clone();
     let links = prepared.links.clone();
     let urls = prepared.urls.clone();
+    #[cfg(test)]
+    let highlight_count = highlights.len();
     let styled = StyledText::new(text.clone())
         .with_highlights(highlights)
         .with_font_family_overrides(prepared.fonts.clone());
     let layout = styled.layout().clone();
+    #[cfg(test)]
+    flow_tests::observe(&layout, highlight_count);
     let clicked_selection = selection.clone();
     let clicked_layout = layout.clone();
     let menu_layout = layout.clone();
@@ -496,173 +507,83 @@ fn rich_inline(
     tone: Tone,
     fade: Option<&crate::reveal::WordFades>,
     _now: Instant,
-    mut word: usize,
+    word_base: usize,
     font_size: f32,
     selection: Option<TextSelection>,
 ) -> AnyElement {
-    let mut children = Vec::new();
-    let mut offset = 0;
-    for (run_ix, run) in runs.iter().enumerate() {
-        let style = &run.style;
-        if style.code {
-            let text = run.text.clone();
-            let file = is_file_chip(&text);
-            let styled = StyledText::new(text.clone());
-            let layout = styled.layout().clone();
-            let selected = selection.as_ref().map(|s| {
-                let selected = s.offset(offset);
-                if file {
-                    selected.with_cursor(gpui::CursorStyle::PointingHand)
-                } else {
-                    selected
-                }
-            });
-            let clicked_selection = selected.clone();
-            let child = styled.into_any_element();
-            let child = if let Some(selected) = selected {
-                selected.wrap(text.clone().into(), layout, child)
-            } else {
-                child
-            };
-            children.push(
-                div()
-                    .id(SharedString::from(format!("{id}-code-{run_ix}")))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .min_h(px(24.))
-                    .max_w_full()
-                    .px(px(6.))
-                    .rounded(px(6.))
-                    .bg(style
-                        .search
-                        .map(search::search_background)
-                        .unwrap_or_else(|| content(0.08)))
-                    .font_family(crate::fonts::mono())
-                    .text_size(px(font_size * 0.8))
-                    .line_height(px(24.))
-                    .text_color(content(1.))
-                    .when(file, |d| {
-                        let path = style.link.clone().unwrap_or_else(|| text.clone());
-                        let menu_path = path.clone();
-                        d.cursor(gpui::CursorStyle::PointingHand)
-                            .hover(|s| s.bg(content(0.13)))
-                            .on_click(move |event, window, cx| {
-                                if activate_link(event, clicked_selection.as_ref()) {
-                                    open_link(&path, window, cx)
-                                }
-                            })
-                            .on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                                link_menu(&menu_path, event.position, window, cx);
-                                cx.stop_propagation();
-                            })
-                            .child(crate::activity::file_icon(&text, 14.))
-                    })
-                    .child(child)
-                    .into_any_element(),
-            );
-            offset += run.text.len();
-            continue;
+    flow::paragraph(runs, id, tone, fade, word_base, font_size, selection)
+}
+fn code_chip(
+    run: &InlineRun,
+    id: &SharedString,
+    run_ix: usize,
+    font_size: f32,
+    selection: Option<TextSelection>,
+) -> AnyElement {
+    let style = &run.style;
+    let text = run.text.clone();
+    let file = is_file_chip(&text);
+    let styled = StyledText::new(text.clone());
+    let layout = styled.layout().clone();
+    #[cfg(test)]
+    flow_tests::observe(&layout, 1);
+    let selected = selection.as_ref().map(|s| {
+        let selected = s.clone();
+        if file {
+            selected.with_cursor(gpui::CursorStyle::PointingHand)
+        } else {
+            selected
         }
-        for (part_ix, part) in run.text.split_inclusive(char::is_whitespace).enumerate() {
-            let text = part.trim_end_matches(char::is_whitespace);
-            if !text.is_empty() {
-                let alpha = if style.link.is_some() || style.math {
-                    1.
-                } else {
-                    let value = fade.map_or(1., |fade| fade.opacity(word));
-                    word += 1;
-                    value
-                };
-                let color = if style.link.is_some() {
-                    accent_color()
-                } else if style.bold || style.italic {
-                    content(tone.strong())
-                } else {
-                    content(tone.prose())
-                };
-                let base_opacity = color.a;
-                let mut opaque_color = color;
-                opaque_color.a = 1.;
-                let highlight = HighlightStyle {
-                    color: Some(opaque_color),
-                    background_color: style.search.map(search::search_background),
-                    fade_out: Some(1. - base_opacity),
-                    font_weight: style.bold.then_some(FontWeight::SEMIBOLD),
-                    font_style: style.italic.then_some(FontStyle::Italic),
-                    strikethrough: style.strikethrough.then_some(StrikethroughStyle {
-                        thickness: px(1.),
-                        color: None,
-                    }),
-                    ..Default::default()
-                };
-                let link = style.link.clone();
-                let menu_link = link.clone();
-                let styled =
-                    StyledText::new(text.to_owned()).with_highlights([(0..text.len(), highlight)]);
-                let layout = styled.layout().clone();
-                let child = styled.into_any_element();
-                let selected = selection.as_ref().map(|s| {
-                    let selected = s.offset(offset);
-                    if link.is_some() {
-                        selected.with_cursor(gpui::CursorStyle::PointingHand)
-                    } else {
-                        selected
-                    }
-                });
-                let clicked_selection = selected.clone();
-                let child = if let Some(selected) = selected {
-                    selected.wrap(text.to_owned().into(), layout, child)
-                } else {
-                    child
-                };
-                children.push(
-                    div()
-                        .id(SharedString::from(format!("{id}-{run_ix}-{part_ix}")))
-                        .debug_selector(move || format!("rich-prose-{run_ix}-{part_ix}"))
-                        .max_w_full()
-                        .text_size(px(font_size))
-                        .line_height(px(24.))
-                        .opacity(alpha)
-                        .when(link.is_some(), |d| {
-                            d.cursor(gpui::CursorStyle::PointingHand)
-                        })
-                        .child(child)
-                        .on_click(move |event, window, cx| {
-                            if let Some(url) = &link
-                                && activate_link(event, clicked_selection.as_ref())
-                            {
-                                open_link(url, window, cx);
-                            }
-                        })
-                        .on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                            if let Some(url) = &menu_link {
-                                link_menu(url, event.position, window, cx);
-                                cx.stop_propagation();
-                            }
-                        })
-                        .into_any_element(),
-                );
-            }
-            offset += part.len();
-            if part.ends_with('\n') {
-                children.push(div().w_full().h(px(0.)).into_any_element());
-            } else if part.len() > text.len() {
-                children.push(div().w(px(font_size * 0.25)).h(px(1.)).into_any_element());
-            }
-        }
-    }
+    });
+    let clicked_selection = selected.clone();
+    let child = styled.into_any_element();
+    let child = if let Some(selected) = selected {
+        selected.wrap(text.clone().into(), layout, child)
+    } else {
+        child
+    };
     div()
-        .id(id)
-        .role(Role::Label)
-        .aria_label(runs.iter().map(|run| run.text.as_str()).collect::<String>())
-        .w_full()
+        .id(SharedString::from(format!("{id}-code-{run_ix}")))
         .flex()
-        .flex_wrap()
         .items_center()
-        .children(children)
+        .gap_1()
+        .min_h(px(24.))
+        .max_w_full()
+        .px(px(6.))
+        .rounded(px(6.))
+        .bg(style
+            .search
+            .map(search::search_background)
+            .unwrap_or_else(|| content(0.08)))
+        .font_family(crate::fonts::mono())
+        .text_size(px(font_size * 0.8))
+        .line_height(px(24.))
+        .text_color(content(1.))
+        .when(file, |d| {
+            let path = style.link.clone().unwrap_or_else(|| text.clone());
+            let menu_path = path.clone();
+            d.cursor(gpui::CursorStyle::PointingHand)
+                .hover(|s| s.bg(content(0.13)))
+                .on_click(move |event, window, cx| {
+                    if activate_link(event, clicked_selection.as_ref()) {
+                        open_link(&path, window, cx)
+                    }
+                })
+                .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                    link_menu(&menu_path, event.position, window, cx);
+                    cx.stop_propagation();
+                })
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .size(px(14.))
+                        .child(crate::activity::file_icon(&text, 14.)),
+                )
+        })
+        .child(div().min_w_0().flex_1().child(child))
         .into_any_element()
 }
+
 fn is_file_chip(text: &str) -> bool {
     !text.chars().any(char::is_whitespace)
         && text
@@ -775,6 +696,7 @@ pub(crate) fn body_selected(
                 },
                 selection,
                 prepared.and_then(|prepared| prepared.inline.as_ref()),
+                false,
             ))
             .into_any_element()
         }
@@ -865,6 +787,7 @@ pub(crate) fn body_selected(
                                             selection.offset(table_offset(&row.part, ix, col))
                                         }),
                                         None,
+                                        false,
                                     ))
                             }))
                     })),
@@ -1154,9 +1077,11 @@ mod rich_wrap_tests {
         });
         let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         visual.run_until_parked();
+        flow_tests::begin_capture();
         visual.refresh().unwrap();
         let bounds = visual.debug_bounds("rich-wrap").unwrap();
-        let prose = visual.debug_bounds("rich-prose-2-0").unwrap();
+        let layouts = flow_tests::finish_capture();
+        let prose = layouts.last().unwrap().bounds();
         assert!(
             prose.right() <= bounds.right(),
             "prose {prose:?} exceeds {bounds:?}"

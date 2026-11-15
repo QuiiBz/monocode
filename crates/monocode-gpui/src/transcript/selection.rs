@@ -644,6 +644,88 @@ impl TranscriptView {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn inline_code_flow_keeps_selection_byte_anchors(cx: &mut TestAppContext) {
+        #[cfg(target_os = "macos")]
+        let cx = &mut TestAppContext::build_with_text_system(
+            cx.dispatcher.clone(),
+            Some("inline_code_selection"),
+            std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+        );
+        let source = "Before **café** [linked words](https://example.com) `src/main.rs` after  e\u{301} 👩‍💻 中文文字 and more text.";
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| TranscriptView::document(source.into(), cx))
+            })
+            .unwrap()
+        });
+        for width in [160., 640.] {
+            cx.simulate_window_resize(window.into(), gpui::size(px(width), px(1000.)));
+            cx.refresh().unwrap();
+            cx.run_until_parked();
+            window
+                .update(cx, |view, _, _| {
+                    let (key, expected) = view
+                        .rows
+                        .iter()
+                        .find_map(|row| {
+                            if let Body::Markdown(md) = &row.body {
+                                Some((row.key, crate::markdown::selection_text(md)))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap();
+                    let mut state = view.selection.0.borrow_mut();
+                    let fragments: Vec<_> = state
+                        .layouts
+                        .values()
+                        .filter(|fragment| fragment.row == key)
+                        .collect();
+                    assert!(fragments.len() >= 3);
+                    assert!(
+                        fragments
+                            .iter()
+                            .any(|fragment| &*fragment.text == "src/main.rs")
+                    );
+                    for fragment in fragments {
+                        assert_eq!(
+                            &expected[fragment.offset..fragment.offset + fragment.text.len()],
+                            &*fragment.text
+                        );
+                        for (byte, grapheme) in fragment
+                            .text
+                            .grapheme_indices(true)
+                            .filter(|(_, text)| !text.chars().all(char::is_whitespace))
+                        {
+                            let position = fragment.layout.position_for_index(byte).unwrap()
+                                + gpui::point(px(0.01), px(12.));
+                            let hit = fragment
+                                .layout
+                                .index_for_position(position)
+                                .unwrap_or_else(|byte| byte);
+                            assert_eq!(hit, byte, "{grapheme} at width {width}");
+                        }
+                    }
+                    state.response = 0;
+                    state.anchor = Some(Position { row: key, byte: 0 });
+                    state.head = Some(Position {
+                        row: key,
+                        byte: expected.len(),
+                    });
+                    drop(state);
+                    assert_eq!(view.selected_text().as_deref(), Some(expected.as_str()));
+                    let mut state = view.selection.0.borrow_mut();
+                    let anchor = state.anchor;
+                    state.anchor = state.head;
+                    state.head = anchor;
+                    drop(state);
+                    assert_eq!(view.selected_text().as_deref(), Some(expected.as_str()));
+                })
+                .unwrap();
+        }
+    }
     #[gpui::test]
     fn rendered_selection_crosses_markdown_and_code_without_chrome_or_other_responses(
         cx: &mut TestAppContext,
