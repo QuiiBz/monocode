@@ -3,6 +3,7 @@
 mod accounts;
 pub(super) mod blocks;
 mod edit;
+mod history;
 mod settings;
 #[cfg(test)]
 mod tests;
@@ -1097,17 +1098,14 @@ impl Store {
             return Ok(Transcript { rows });
         }
         let blocks = self.shared_blocks(id)?;
-        let mut rows = Vec::new();
-        for block in &blocks {
-            project(block, &mut rows)?;
-        }
+        let (history, revision) = history::project(&blocks, metadata)?;
         self.shared
             .as_ref()
             .unwrap()
             .snapshots
             .borrow_mut()
-            .insert(id, HistoryRevision::of(&blocks));
-        Ok(Transcript { rows })
+            .insert(id, revision);
+        Ok(history)
     }
     pub(super) fn shared_store_blocks(&self, id: i64, blocks: &[Value]) -> Result<(), String> {
         let original = self.persisted_session_id(id)?;
