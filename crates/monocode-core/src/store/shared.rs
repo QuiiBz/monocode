@@ -162,6 +162,7 @@ struct HistoryMetadata {
     turns: HashMap<usize, crate::agent::TurnInfo>,
     root_turn: Option<usize>,
     operator_enabled: bool,
+    draft: Option<crate::follow_up::Message>,
 }
 
 impl HistoryMetadata {
@@ -177,6 +178,11 @@ impl HistoryMetadata {
     }
 
     fn push(&mut self, block: &Value, rows: &[Row], offset: usize) {
+        if self.draft.is_none() && block["draft"] == true {
+            let mut draft = follow_up(block);
+            draft.at = offset;
+            self.draft = Some(draft);
+        }
         self.operator_enabled |= block["role"] == "user"
             && block["draft"] != true
             && block["internal"] != true
@@ -1024,9 +1030,20 @@ impl Store {
     }
     pub(super) fn shared_load_session(&self, id: i64) -> Result<super::LoadedSession, String> {
         let mut settings = self.shared_agent_metadata(id);
-        let history =
-            self.shared_load_history(id, settings.as_mut().ok().and_then(Option::as_mut))?;
-        Ok(super::LoadedSession { history, settings })
+        let mut metadata = HistoryMetadata::default();
+        let history = self.shared_load_history(id, Some(&mut metadata))?;
+        let follow_ups = self.shared_follow_up_metadata(id).and_then(|mut state| {
+            state.draft = metadata.draft.take();
+            self.filter_delivered_follow_ups(id, state)
+        });
+        if let Ok(Some(settings)) = &mut settings {
+            metadata.apply(settings);
+        }
+        Ok(super::LoadedSession {
+            history,
+            settings,
+            follow_ups,
+        })
     }
     pub(super) fn shared_load(&self, id: i64) -> Result<Transcript, String> {
         self.shared_load_history(id, None)
@@ -1034,9 +1051,8 @@ impl Store {
     fn shared_load_history(
         &self,
         id: i64,
-        settings: Option<&mut Settings>,
+        mut metadata: Option<&mut HistoryMetadata>,
     ) -> Result<Transcript, String> {
-        let mut metadata = settings.as_ref().map(|_| HistoryMetadata::default());
         let mut project = |block: &Value, rows: &mut Vec<Row>| -> Result<(), String> {
             let projected = blocks::project(std::slice::from_ref(block))?;
             if let Some(metadata) = metadata.as_mut() {
@@ -1074,9 +1090,6 @@ impl Store {
                 .snapshots
                 .borrow_mut()
                 .insert(id, HistoryRevision(digest.finalize().into()));
-            if let (Some(metadata), Some(settings)) = (metadata, settings) {
-                metadata.apply(settings);
-            }
             return Ok(Transcript { rows });
         }
         let blocks = self.shared_blocks(id)?;
@@ -1090,9 +1103,6 @@ impl Store {
             .snapshots
             .borrow_mut()
             .insert(id, HistoryRevision::of(&blocks));
-        if let (Some(metadata), Some(settings)) = (metadata, settings) {
-            metadata.apply(settings);
-        }
         Ok(Transcript { rows })
     }
     pub(super) fn shared_store_blocks(&self, id: i64, blocks: &[Value]) -> Result<(), String> {
@@ -1704,6 +1714,16 @@ impl Store {
         }
     }
     pub(crate) fn shared_follow_ups(&self, id: i64) -> Result<crate::follow_up::State, String> {
+        let mut state = self.shared_follow_up_metadata(id)?;
+        let blocks = self.shared_blocks(id)?;
+        if let Some((at, block)) = blocks.iter().enumerate().find(|(_, b)| b["draft"] == true) {
+            let mut draft = follow_up(block);
+            draft.at = blocks::project(&blocks[..at])?.len();
+            state.draft = Some(draft);
+        }
+        Ok(state)
+    }
+    fn shared_follow_up_metadata(&self, id: i64) -> Result<crate::follow_up::State, String> {
         let fields = format!(
             "{},{}",
             self.shared_field("queued_messages_json", "'[]'"),
@@ -1726,13 +1746,7 @@ impl Store {
             .borrow_mut()
             .insert(id, raw.clone());
         state.messages = parse::<Vec<Value>>(&raw)?.iter().map(follow_up).collect();
-        let blocks = self.shared_blocks(id)?;
         state.draft = None;
-        if let Some((at, block)) = blocks.iter().enumerate().find(|(_, b)| b["draft"] == true) {
-            let mut draft = follow_up(block);
-            draft.at = blocks::project(&blocks[..at])?.len();
-            state.draft = Some(draft);
-        }
         state.paused = status.as_deref() == Some("paused") || !state.messages.is_empty();
         Ok(state)
     }

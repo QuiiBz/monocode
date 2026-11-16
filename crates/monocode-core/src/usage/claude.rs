@@ -140,7 +140,10 @@ fn keychain_service(config: Option<&std::path::Path>) -> String {
     config
         .map(|dir| {
             let selector: String = dir.to_string_lossy().nfc().collect();
-            let digest = format!("{:x}", Sha256::digest(selector.as_bytes()));
+            let digest: String = Sha256::digest(selector.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
             format!("Claude Code-credentials-{}", &digest[..8])
         })
         .unwrap_or_else(|| "Claude Code-credentials".into())
@@ -198,6 +201,15 @@ fn keychain(config: Option<&std::path::Path>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_service_preserves_the_saved_hash_with_leading_zeroes() {
+        assert_eq!(
+            keychain_service(Some(std::path::Path::new("/tmp/monocode-profile-471"))),
+            "Claude Code-credentials-00170a45"
+        );
+    }
+
     #[test]
     fn an_expired_access_token_with_a_refresh_token_is_not_a_sign_out() {
         let renewable = serde_json::json!({"accessToken":"a","refreshToken":"r","expiresAt":1});

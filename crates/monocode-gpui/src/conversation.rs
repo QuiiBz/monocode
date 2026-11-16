@@ -738,21 +738,26 @@ impl Conversation {
                 };
                 Ok((loaded, edits))
             });
-            let (history, settings) = match loaded {
+            let (history, settings, follow_ups) = match loaded {
                 Ok((loaded, edits)) => (
                     Ok((
                         crate::transcript::PreparedHistory::new(loaded.history.rows, mono),
                         edits,
                     )),
                     loaded.settings,
+                    loaded.follow_ups,
                 ),
-                Err(error) => (Err(error), Ok(None)),
+                Err(error) => (
+                    Err(error),
+                    Ok(None),
+                    locked(&store).and_then(|s| s.follow_ups(id)),
+                ),
             };
             (
                 history,
                 settings,
                 locked(&store).and_then(|s| s.context_usage(id)),
-                locked(&store).and_then(|s| s.follow_ups(id)),
+                follow_ups,
                 locked(&store).and_then(|s| s.history_before(id)),
             )
         });

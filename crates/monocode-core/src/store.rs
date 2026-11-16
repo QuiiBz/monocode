@@ -61,6 +61,7 @@ pub struct LoadedSession {
     pub history: Transcript,
     // Invalid settings must not prevent saved messages from being displayed.
     pub settings: Result<Option<crate::agent::Settings>, String>,
+    pub follow_ups: Result<crate::follow_up::State, String>,
 }
 
 impl Store {
@@ -723,6 +724,7 @@ impl Store {
         Ok(LoadedSession {
             history: self.load(session)?,
             settings,
+            follow_ups: self.follow_ups(session),
         })
     }
 

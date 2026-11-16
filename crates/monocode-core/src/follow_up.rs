@@ -126,7 +126,7 @@ impl State {
 
 impl crate::store::Store {
     pub fn follow_ups(&self, session: i64) -> Result<State, String> {
-        let mut state: State = if self.uses_monocode_schema() && session >= 0 {
+        let state: State = if self.uses_monocode_schema() && session >= 0 {
             self.shared_follow_ups(session)?
         } else {
             self.setting(&format!("follow-up:{session}"))?
@@ -134,6 +134,13 @@ impl crate::store::Store {
                 .transpose()?
                 .unwrap_or_default()
         };
+        self.filter_delivered_follow_ups(session, state)
+    }
+    pub(crate) fn filter_delivered_follow_ups(
+        &self,
+        session: i64,
+        mut state: State,
+    ) -> Result<State, String> {
         let mut remaining = Vec::new();
         for message in state.messages {
             if self

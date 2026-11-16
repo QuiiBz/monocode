@@ -446,9 +446,11 @@ fn indexed_mono_history_stays_in_its_desktop_tables_with_block_ids_intact() {
             |r| r.get(0),
         )
         .unwrap();
-    let t = store.load(id).unwrap();
+    let loaded = store.load_session(id).unwrap();
+    let t = loaded.history;
     assert_eq!(t.rows[0].text, "Mono history");
-    let mut state = store.follow_ups(id).unwrap();
+    let mut state = loaded.follow_ups.unwrap();
+    assert_eq!(state.draft.as_ref().unwrap().at, t.rows.len());
     state.draft = None;
     state.revision += 1;
     store.save_follow_ups(id, &state).unwrap();
@@ -542,6 +544,7 @@ fn combined_session_load_reads_history_once_and_preserves_joined_turns() {
     );
     let expected_history = store.load(id).unwrap();
     let expected_settings = serde_json::to_value(store.agent_settings(id).unwrap()).unwrap();
+    let expected_follow_ups = serde_json::to_value(store.follow_ups(id).unwrap()).unwrap();
     let reads = Arc::new(AtomicUsize::new(0));
     let history_reads = reads.clone();
     store
@@ -561,6 +564,10 @@ fn combined_session_load_reads_history_once_and_preserves_joined_turns() {
         .unwrap();
     let loaded = store.load_session(id).unwrap();
     assert_eq!(reads.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        serde_json::to_value(loaded.follow_ups.unwrap()).unwrap(),
+        expected_follow_ups
+    );
     assert_eq!(loaded.history.rows, expected_history.rows);
     let settings = loaded.settings.unwrap().unwrap();
     assert!(settings.operator_enabled);
@@ -581,7 +588,13 @@ fn combined_session_load_reads_history_once_and_preserves_joined_turns() {
 #[test]
 fn combined_session_load_keeps_history_when_settings_are_invalid() {
     let store = Store::open_monocode(Path::new(":memory:")).unwrap();
-    let (id, original) = saved(&store, json!([{"role":"user","text":"Saved prompt"}]));
+    let (id, original) = saved(
+        &store,
+        json!([
+            {"role":"user","text":"Saved prompt"},
+            {"id":"draft","role":"user","text":"Saved draft","draft":true}
+        ]),
+    );
     store
         .conn
         .execute(
@@ -592,6 +605,98 @@ fn combined_session_load_keeps_history_when_settings_are_invalid() {
     let loaded = store.load_session(id).unwrap();
     assert!(loaded.settings.is_err());
     assert_eq!(loaded.history.rows[0].text, "Saved prompt");
+    assert_eq!(
+        loaded.follow_ups.unwrap().draft.unwrap().text,
+        "Saved draft"
+    );
+}
+
+#[test]
+fn combined_session_load_restores_the_first_draft_at_its_projected_offset() {
+    let store = Store::open_monocode(Path::new(":memory:")).unwrap();
+    let (id, original) = saved(
+        &store,
+        json!([
+            {"role":"system","text":"","internal":true},
+            {"role":"user","text":"Long prompt ".repeat(1_000),"noteCard":{"id":"note","title":"Context"}},
+            {"role":"assistant","text":"First answer"},
+            {"id":"first-draft","role":"user","text":"Unsent","draft":true,
+             "preparedPrompt":"Prepared context: Unsent","intent":"plan","error":"Retry",
+             "attachments":[{"path":"/image.png"}]},
+            {"role":"assistant","text":"Later answer"},
+            {"id":"second-draft","role":"user","text":"Later draft","draft":true}
+        ]),
+    );
+    let queued = json!([
+        {"id":"delivered","text":"Already sent"},
+        {"id":"pending","text":"Pending"}
+    ]);
+    store
+        .conn
+        .execute(
+            "UPDATE sessions SET queued_messages_json=?2 WHERE id=?1",
+            params![original, queued.to_string()],
+        )
+        .unwrap();
+    store
+        .save_setting(&format!("mono-delivered:{id}:delivered"), "1")
+        .unwrap();
+    let expected = store.follow_ups(id).unwrap();
+    let loaded = store.load_session(id).unwrap();
+    let state = loaded.follow_ups.unwrap();
+    assert_eq!(
+        serde_json::to_value(&state).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.messages[0].id, "pending");
+    assert!(state.paused);
+    let draft = state.draft.unwrap();
+    assert_eq!(draft.id, "first-draft");
+    assert_eq!(
+        draft.at,
+        loaded
+            .history
+            .rows
+            .iter()
+            .position(|row| row.text == "Later answer")
+            .unwrap()
+    );
+    assert!(draft.at > 3);
+    assert_eq!(
+        draft.prepared_prompt.as_deref(),
+        Some("Prepared context: Unsent")
+    );
+    assert_eq!(draft.attachments, [PathBuf::from("/image.png")]);
+    assert_eq!(draft.mode.as_deref(), Some("plan"));
+    assert_eq!(draft.error.as_deref(), Some("Retry"));
+    store
+        .save_setting(&format!("mono-delivered:{id}:first-draft"), "1")
+        .unwrap();
+    assert!(store
+        .load_session(id)
+        .unwrap()
+        .follow_ups
+        .unwrap()
+        .draft
+        .is_none());
+}
+
+#[test]
+fn combined_session_load_keeps_history_when_the_queue_is_invalid() {
+    let store = Store::open_monocode(Path::new(":memory:")).unwrap();
+    let (id, original) = saved(&store, json!([{"role":"user","text":"Saved prompt"}]));
+    store
+        .conn
+        .execute(
+            "UPDATE sessions SET queued_messages_json='invalid' WHERE id=?1",
+            [original],
+        )
+        .unwrap();
+    let loaded = store.load_session(id).unwrap();
+    assert_eq!(loaded.history.rows[0].text, "Saved prompt");
+    assert!(loaded.settings.unwrap().is_some());
+    assert!(loaded.follow_ups.is_err());
 }
 
 #[test]
@@ -802,8 +907,9 @@ fn drafts_queues_and_receipts_keep_desktop_metadata_and_do_not_replay() {
             params![source, queued.to_string()],
         )
         .unwrap();
-    let mut t = store.load(id).unwrap();
-    let mut state = store.follow_ups(id).unwrap();
+    let loaded = store.load_session(id).unwrap();
+    let mut t = loaded.history;
+    let mut state = loaded.follow_ups.unwrap();
     assert!(state.paused);
     assert_eq!(state.messages.len(), 1);
     assert_eq!(state.draft.as_ref().unwrap().text, "Unsent");
