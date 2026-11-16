@@ -212,7 +212,7 @@ mod tests {
                         },
                         crate::transcript::Row {
                             role: "tool".into(),
-                            text: serde_json::to_string(&tool).unwrap(),
+                            text: serde_json::to_string(&tool).unwrap().into(),
                             first: true,
                             sent_at: None,
                         },

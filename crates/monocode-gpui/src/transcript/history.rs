@@ -242,6 +242,7 @@ impl TranscriptView {
         let mut source = page.rows;
         source.append(Arc::make_mut(&mut self.source));
         self.source = Arc::new(source);
+        self.tool_details.clear();
         for (turn, info) in page.turns {
             self.turns.entry(turn).or_insert(info);
         }
@@ -427,6 +428,7 @@ impl TranscriptView {
             following: self.list.is_following_tail(),
         });
         self.source = Arc::default();
+        self.tool_details.clear();
         self.source_bytes = 0;
         self.history_start = 0;
         self.history_loading = false;
@@ -478,6 +480,7 @@ impl TranscriptView {
         self.drop_older_history();
         // Reopening also handles a source that became empty in another window.
         self.source = Arc::default();
+        self.tool_details.clear();
         self.source_bytes = 0;
         self.messages = Vec::new();
         self.rows = Vec::new();
@@ -539,8 +542,8 @@ mod tests {
 
     fn long_mono(turns: usize) -> Vec<Row> {
         (0..turns).flat_map(|turn| [
-            Row { role: "user".into(), text: format!("Question {turn}"), first: true, sent_at: Some(turn as u64) },
-            Row { role: "assistant".into(), text: format!("Answer **{turn}**.\n\nA second paragraph with [a link](https://example.com)."), first: true, sent_at: None },
+            Row { role: "user".into(), text: format!("Question {turn}").into(), first: true, sent_at: Some(turn as u64) },
+            Row { role: "assistant".into(), text: format!("Answer **{turn}**.\n\nA second paragraph with [a link](https://example.com).").into(), first: true, sent_at: None },
         ]).collect()
     }
 

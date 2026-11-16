@@ -1054,7 +1054,11 @@ impl Store {
         mut metadata: Option<&mut HistoryMetadata>,
     ) -> Result<Transcript, String> {
         let mut project = |block: &Value, rows: &mut Vec<Row>| -> Result<(), String> {
-            let projected = blocks::project(std::slice::from_ref(block))?;
+            let projected = if metadata.is_some() {
+                blocks::project_for_view(block)?
+            } else {
+                blocks::project(std::slice::from_ref(block))?
+            };
             if let Some(metadata) = metadata.as_mut() {
                 metadata.push(block, &projected, rows.len());
             }

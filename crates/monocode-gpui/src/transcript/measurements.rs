@@ -704,7 +704,7 @@ mod tests {
             // even though the supplied source row is not its first row.
             let mut edited = view.source[prompt + 1].clone();
             assert!(!edited.first);
-            edited.text = "A longer replacement line ".repeat(20);
+            edited.text = "A longer replacement line ".repeat(20).into();
             view.patch(prompt + 1, vec![edited], cx);
             assert!(view.split_prompt_width(tail, window).unwrap() > width);
             assert_eq!(view.split_prompt_width(0, window), Some(prefix_width));
@@ -774,7 +774,8 @@ mod tests {
                 text: monocode_core::transcript::attachments::from_paths(&[
                     std::path::PathBuf::from("/tmp/notes.txt"),
                 ])
-                .to_string(),
+                .to_string()
+                .into(),
                 first: true,
                 sent_at: None,
             };

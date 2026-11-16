@@ -76,7 +76,7 @@ impl Transcript {
             }
             self.rows.push(Row {
                 role: ROLE.into(),
-                text: files.to_string(),
+                text: files.to_string().into(),
                 first: true,
                 sent_at: None,
             });

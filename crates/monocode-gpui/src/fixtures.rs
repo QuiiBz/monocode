@@ -61,7 +61,8 @@ pub(crate) fn chat() -> Transcript {
             panel: None,
             display: None,
         })
-        .unwrap();
+        .unwrap()
+        .into();
     }
     t
 }

@@ -391,7 +391,7 @@ mod tests {
                                 0,
                                 &[monocode_core::transcript::Row {
                                     role: "assistant".into(),
-                                    text: format!("Saved answer {i}"),
+                                    text: format!("Saved answer {i}").into(),
                                     first: true,
                                     sent_at: None,
                                 }],

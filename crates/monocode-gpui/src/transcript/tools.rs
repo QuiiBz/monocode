@@ -77,7 +77,23 @@ impl TranscriptView {
         tiled: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if let Some(panel) = tasks::render(self, &tool, start, width, cx) {
+        let details = if scope.is_none()
+            && self
+                .source
+                .get(start)
+                .is_some_and(|row| row.text.is_deferred())
+        {
+            Some(
+                self.tool_details
+                    .entry(start)
+                    .or_insert_with(|| self.source[start].text.tool_details().unwrap())
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        let tool = details.as_deref().unwrap_or(&tool);
+        if let Some(panel) = tasks::render(self, tool, start, width, cx) {
             return panel;
         }
         let identity = scope.map_or_else(|| start.to_string(), |scope| format!("{start}:{scope}"));
@@ -569,7 +585,7 @@ mod tests {
             call.state = ToolState::Completed;
             view.patch(0, vec![
                 Row { role: "user".into(), text: "Find model settings".into(), first: true, sent_at: None },
-                Row { role: "tool".into(), text: serde_json::to_string(&call).unwrap(), first: true, sent_at: None },
+                Row { role: "tool".into(), text: serde_json::to_string(&call).unwrap().into(), first: true, sent_at: None },
             ], cx);
             view.work_folds.insert(1, true);
             view.phases.insert(1, true);
@@ -624,7 +640,7 @@ mod tests {
             call.state = ToolState::Completed;
             view.patch(0, vec![
                 Row { role: "user".into(), text: "Check the build".into(), first: true, sent_at: None },
-                Row { role: "tool".into(), text: serde_json::to_string(&call).unwrap(), first: true, sent_at: None },
+                Row { role: "tool".into(), text: serde_json::to_string(&call).unwrap().into(), first: true, sent_at: None },
             ], cx);
             view.work_folds.insert(1, true);
             view.phases.insert(1, true);
@@ -670,7 +686,7 @@ mod tests {
             .update(cx, |view, _, cx| {
                 let row = |role: &str, text: String| Row {
                     role: role.into(),
-                    text,
+                    text: text.into(),
                     first: true,
                     sent_at: None,
                 };
@@ -856,7 +872,7 @@ mod tests {
         let view = cx.new(|_| TranscriptView::new());
         let row = |role: &str, text: String| Row {
             role: role.into(),
-            text,
+            text: text.into(),
             first: true,
             sent_at: None,
         };

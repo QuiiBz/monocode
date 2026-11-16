@@ -34,14 +34,19 @@ pub(super) type CommitFiles = HashMap<String, Option<Arc<Vec<CommitFile>>>>;
 fn runs(rows: &[Row]) -> Vec<(String, String, bool)> {
     rows.iter()
         .filter(|row| row.role == "tool")
-        .filter_map(|row| serde_json::from_str::<ToolCall>(&row.text).ok())
-        .filter_map(|tool| {
+        .filter_map(|row| {
+            let tool = serde_json::from_str::<ToolCall>(row.display_text()).ok()?;
             let shown = tool.presentation();
             if shown.action != "Run" && shown.command.is_none() {
                 return None;
             }
             let command = shown.command.unwrap_or(shown.target);
-            Some((command, tool.output, tool.state == ToolState::Completed))
+            let tool = row.text.tool_details().unwrap_or_else(|| Arc::new(tool));
+            Some((
+                command,
+                tool.output.clone(),
+                tool.state == ToolState::Completed,
+            ))
         })
         .collect()
 }
@@ -62,7 +67,7 @@ fn report_of(runs: &[(String, String, bool)]) -> Report {
 pub(crate) fn latest_commit(rows: &[Row]) -> Option<String> {
     rows.iter()
         .rev()
-        .filter(|row| row.role == "tool" && row.text.contains("commit"))
+        .filter(|row| row.role == "tool" && row.display_text().contains("commit"))
         .find_map(|row| {
             report_of(&runs(std::slice::from_ref(row)))
                 .commits
@@ -685,7 +690,7 @@ mod tests {
     fn row(role: &str, text: String) -> Row {
         Row {
             role: role.into(),
-            text,
+            text: text.into(),
             first: true,
             sent_at: None,
         }

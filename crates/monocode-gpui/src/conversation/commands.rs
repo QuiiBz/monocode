@@ -147,7 +147,7 @@ impl Conversation {
         );
         let mut compact_row = Row {
             role: "tool".into(),
-            text: serde_json::to_string(&compact_tool).unwrap(),
+            text: serde_json::to_string(&compact_tool).unwrap().into(),
             first: true,
             sent_at: Some(monocode_core::time::now_ms()),
         };
@@ -209,7 +209,7 @@ impl Conversation {
                 ToolState::Failed
             };
             compact_tool.output = result.as_ref().err().cloned().unwrap_or_default();
-            compact_row.text = serde_json::to_string(&compact_tool).unwrap();
+            compact_row.text = serde_json::to_string(&compact_tool).unwrap().into();
             let saved = locked(&store).and_then(|mut store| {
                 store.write_rows(session, compact_start, &[compact_row.clone()])
             });

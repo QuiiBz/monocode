@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 
 pub mod attachments;
+mod text;
+pub use text::RowText;
 
 pub const ROW_BYTES: usize = 2048;
 
@@ -24,13 +26,16 @@ impl Interjection {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub role: String,
-    pub text: String,
+    pub text: RowText,
     pub first: bool,
     /// Wall-clock send time on the first row; older histories may not have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<u64>,
 }
 impl Row {
+    pub fn display_text(&self) -> &str {
+        self.text.display_text()
+    }
     pub fn is_prompt(&self) -> bool {
         matches!(self.role.as_str(), "user" | "mono-system")
     }
@@ -46,7 +51,7 @@ impl Transcript {
         let ix = self.rows.len();
         self.rows.push(Row {
             role: role.into(),
-            text: String::new(),
+            text: RowText::default(),
             first: true,
             sent_at: Some(crate::time::now_ms()),
         });
@@ -77,7 +82,7 @@ impl Transcript {
                 let role = last.role.clone();
                 self.rows.push(Row {
                     role,
-                    text: String::new(),
+                    text: RowText::default(),
                     first: false,
                     sent_at: None,
                 });
@@ -89,7 +94,7 @@ impl Transcript {
                 let role = last.role.clone();
                 self.rows.push(Row {
                     role,
-                    text: String::new(),
+                    text: RowText::default(),
                     first: false,
                     sent_at: None,
                 });

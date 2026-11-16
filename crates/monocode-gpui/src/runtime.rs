@@ -337,8 +337,9 @@ fn run_turn_using(
             };
             transfer.input = serde_json::json!({ "from": from }).to_string();
             let transfer_row = transcript.begin("tool");
-            transcript.rows[transfer_row].text =
-                serde_json::to_string(&transfer).map_err(|e| e.to_string())?;
+            transcript.rows[transfer_row].text = serde_json::to_string(&transfer)
+                .map_err(|e| e.to_string())?
+                .into();
             pending.changed(transfer_row);
             publish(
                 &tx,
@@ -386,8 +387,9 @@ fn run_turn_using(
             } else {
                 monocode_core::tool::ToolState::Completed
             };
-            transcript.rows[transfer_row].text =
-                serde_json::to_string(&transfer).map_err(|e| e.to_string())?;
+            transcript.rows[transfer_row].text = serde_json::to_string(&transfer)
+                .map_err(|e| e.to_string())?
+                .into();
             pending.changed(transfer_row);
             settings.handoff = Some(prepared.clone());
             prepared_handoff = Some(prepared.clone());
@@ -744,8 +746,9 @@ fn run_turn_using(
                             let ix = *tool_rows
                                 .entry(tool.id.clone())
                                 .or_insert_with(|| transcript.begin("tool"));
-                            transcript.rows[ix].text =
-                                serde_json::to_string(&tool).map_err(|e| e.to_string())?;
+                            transcript.rows[ix].text = serde_json::to_string(&tool)
+                                .map_err(|e| e.to_string())?
+                                .into();
                             start = start.min(ix);
                             pending.changed(ix);
                             contributions::record(&store, summary.id, &summary.cwd, &tool);
@@ -1012,7 +1015,7 @@ fn run_turn_using(
                     })
                 };
             }
-            row.text = serde_json::to_string(&tool).unwrap();
+            row.text = serde_json::to_string(&tool).unwrap().into();
             final_start = final_start.min(ix);
         }
     }
@@ -1125,7 +1128,8 @@ fn run_turn_using(
 pub(crate) fn edited_paths(rows: &[Row]) -> Vec<String> {
     let mut paths = Vec::new();
     for row in rows.iter().filter(|r| r.role == "tool") {
-        let Ok(tool) = serde_json::from_str::<monocode_core::tool::ToolCall>(&row.text) else {
+        let Ok(tool) = serde_json::from_str::<monocode_core::tool::ToolCall>(row.display_text())
+        else {
             continue;
         };
         if tool.state != monocode_core::tool::ToolState::Completed {
@@ -1188,7 +1192,7 @@ mod edited_paths_tests {
             tool.input = input.to_string();
             Row {
                 role: "tool".into(),
-                text: serde_json::to_string(&tool).unwrap(),
+                text: serde_json::to_string(&tool).unwrap().into(),
                 first: true,
                 sent_at: None,
             }

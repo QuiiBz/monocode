@@ -523,6 +523,39 @@ fn saved(store: &Store, blocks: Value) -> (i64, String) {
 }
 
 #[test]
+fn deferred_tool_rows_preserve_source_saves_and_edit_revision_checks() {
+    let mut store = Store::open_monocode(Path::new(":memory:")).unwrap();
+    let source = json!([
+        {"id":"prompt","role":"user","text":"Inspect","providerTurnId":"turn"},
+        {"id":"tool","role":"tool","tool":{"kind":"read","status":"completed","rawInput":{"file_path":"src/lib.rs"},"detail":"Full output 🙂".repeat(20_000)},"future":{"keep":true}},
+        {"id":"reply","role":"assistant","text":"Done"}
+    ]);
+    let (id, original) = saved(&store, source.clone());
+    let rows = store.load_session(id).unwrap().history.rows;
+    assert!(rows[1].text.is_deferred());
+    assert!(!rows[1].text.is_materialized());
+    assert_eq!(
+        serde_json::from_str::<crate::tool::ToolCall>(rows[1].display_text())
+            .unwrap()
+            .output,
+        ""
+    );
+    assert!(!rows[1].text.is_materialized());
+    let edit = store.prepare_edit_last_turn(id, &rows, None).unwrap();
+    assert!(edit.matches(&rows));
+    store.write_rows(id, 1, &rows[1..2]).unwrap();
+    assert_eq!(
+        store.shared_blocks(id).unwrap(),
+        source.as_array().unwrap().clone()
+    );
+    store.conn.execute(
+        "UPDATE sessions SET blocks_json=json_set(blocks_json,'$[1].future.external',true) WHERE id=?1",
+        [original],
+    ).unwrap();
+    assert!(store.validate_edit_last_turn(id, &edit).is_err());
+}
+
+#[test]
 fn combined_session_load_reads_history_once_and_preserves_joined_turns() {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{

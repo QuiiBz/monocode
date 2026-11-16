@@ -79,20 +79,22 @@ pub(crate) fn collect_visible(
         if role == "tool"
             && folded(at)
             && live_turn.is_none_or(|turn| at < turn)
-            && serde_json::from_str::<CallState>(&rows[at].text)
+            && serde_json::from_str::<CallState>(rows[at].display_text())
                 .is_ok_and(|call| !matches!(call.state, ToolState::Failed | ToolState::Cancelled))
         {
             leading = false;
             at = end;
             continue;
         }
-        let readable = rows[at..end].iter().any(|r| !r.text.trim().is_empty());
+        let readable = rows[at..end]
+            .iter()
+            .any(|r| !r.display_text().trim().is_empty());
         if matches!(role, "reasoning" | "assistant") && !readable {
             result.hidden.insert(at);
         } else if role == "reasoning" {
             members.push(at);
         } else if role == "tool"
-            && let Ok(mut call) = serde_json::from_str::<ToolCall>(&rows[at].text)
+            && let Ok(mut call) = serde_json::from_str::<ToolCall>(rows[at].display_text())
         {
             let standalone = match call.panel() {
                 Some(Panel::Agent(_))

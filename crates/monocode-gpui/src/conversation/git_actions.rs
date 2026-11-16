@@ -474,7 +474,7 @@ mod tests {
         .into_iter()
         .map(|(role, text)| Row {
             role: role.into(),
-            text,
+            text: text.into(),
             first: true,
             sent_at: None,
         })
@@ -604,7 +604,7 @@ mod tests {
             serde_json::json!({"file_path":repo.0.join("own.rs"), "cwd":repo.cwd()}).to_string();
         let row = |role: &str, text: String| Row {
             role: role.into(),
-            text,
+            text: text.into(),
             first: true,
             sent_at: None,
         };

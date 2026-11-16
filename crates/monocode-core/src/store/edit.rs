@@ -351,7 +351,7 @@ mod tests {
             r"\\server\share\photo.png",
         ] {
             let (mut store, id, mut rows) = fixture();
-            rows[2].text = format!("Describe image\n\n[photo.png](<{path}>)");
+            rows[2].text = format!("Describe image\n\n[photo.png](<{path}>)").into();
             store.write_rows(id, 2, &rows[2..]).unwrap();
             assert!(store
                 .prepare_edit_last_turn(id, &rows, Some("turn"))

@@ -201,7 +201,7 @@ fn import_sessions(
                     id,
                     ix as i64,
                     row.role,
-                    row.text,
+                    row.text.as_str(),
                     row.first,
                     row.sent_at.map(|at| at.min(i64::MAX as u64) as i64)
                 ])?;
@@ -305,7 +305,7 @@ fn transcript(blocks: &[Value]) -> rusqlite::Result<Transcript> {
             call.bound_output();
             transcript.begin("tool");
             transcript.rows.last_mut().unwrap().text =
-                serde_json::to_string(&call).map_err(invalid)?;
+                serde_json::to_string(&call).map_err(invalid)?.into();
         } else if role == "tasks" && crate::tool::tasks::from_desktop(block).is_some() {
             let mut call = ToolCall::new(block["id"].as_str().unwrap_or(""), "update_plan");
             call.input = block["taskList"].to_string();
@@ -313,7 +313,7 @@ fn transcript(blocks: &[Value]) -> rusqlite::Result<Transcript> {
             call.state = ToolState::Completed;
             transcript.begin("tool");
             transcript.rows.last_mut().unwrap().text =
-                serde_json::to_string(&call).map_err(invalid)?;
+                serde_json::to_string(&call).map_err(invalid)?.into();
         } else {
             if text.is_empty() {
                 continue;

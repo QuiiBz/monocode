@@ -401,7 +401,7 @@ pub(crate) fn run_launches(
                 found.push(id);
             }
         } else if source[at].role == "tool" {
-            let text: String = source[at..next].iter().map(|r| r.text.as_str()).collect();
+            let text: String = source[at..next].iter().map(Row::display_text).collect();
             if let Ok(tool) = serde_json::from_str::<ToolCall>(&text)
                 && tool.state == ToolState::Completed
                 && let Ok(input) = serde_json::from_str::<serde_json::Value>(&tool.input)
@@ -411,6 +411,10 @@ pub(crate) fn run_launches(
                     .and_then(monocode_core::mono::work::command_action)
                 && matches!(action.as_str(), "sessions.start" | "sessions.send")
             {
+                let tool = source[at]
+                    .text
+                    .tool_details()
+                    .unwrap_or_else(|| Arc::new(tool));
                 let receipts = serde_json::from_str::<serde_json::Value>(&tool.output)
                     .map(|v| vec![v])
                     .unwrap_or_else(|_| {
@@ -547,7 +551,7 @@ pub(crate) fn mono_work_label(source: &[Row], group: usize) -> String {
         let end = (at + 1..source.len())
             .find(|&i| source[i].first)
             .unwrap_or(source.len());
-        source[at..end].iter().map(|r| r.text.as_str()).collect()
+        source[at..end].iter().map(Row::display_text).collect()
     };
     // A reasoning summary's own heading says what it is working on.
     if let Some(heading) = reasoning.and_then(|at| reasoning_heading(&message(at))) {
@@ -706,6 +710,7 @@ pub(crate) struct TranscriptView {
     history_failed: bool,
     history_search: Option<(usize, String)>,
     prepared_parsers: HashMap<usize, MarkdownParser>,
+    tool_details: HashMap<usize, Arc<ToolCall>>,
     mono: bool,
     mono_groups: std::cell::RefCell<HashMap<usize, usize>>,
     /// The Mono's mascot, colour and name, which sign its turns.
@@ -934,7 +939,7 @@ impl TranscriptView {
             0,
             vec![Row {
                 role: "assistant".into(),
-                text,
+                text: text.into(),
                 first: true,
                 sent_at: None,
             }],
@@ -2563,6 +2568,7 @@ impl TranscriptView {
             history_failed: false,
             history_search: None,
             prepared_parsers: HashMap::new(),
+            tool_details: HashMap::new(),
             mono: false,
             mono_groups: Default::default(),
             mono_look: None,
@@ -2719,7 +2725,9 @@ impl TranscriptView {
                     tool.output = "Cancelled".into();
                 }
                 let previous_bytes = row.text.len();
-                row.text = serde_json::to_string(&tool).unwrap_or_else(|_| row.text.clone());
+                row.text = serde_json::to_string(&tool)
+                    .unwrap_or_else(|_| row.text.to_string())
+                    .into();
                 self.source_bytes = self
                     .source_bytes
                     .saturating_sub(previous_bytes)
@@ -2956,7 +2964,8 @@ impl TranscriptView {
             submitted.rows.push(Row {
                 role: monocode_core::transcript::attachments::ROLE.into(),
                 text: monocode_core::transcript::attachments::from_paths(&settings.attachments)
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 first: true,
                 sent_at: None,
             });
@@ -3013,6 +3022,7 @@ impl TranscriptView {
         self.rows_patched(start, known, cx);
     }
     fn rows_patched(&mut self, start: usize, known: usize, cx: &mut Context<Self>) {
+        self.tool_details.retain(|&at, _| at < start);
         self.visuals.retain(|&start, _| {
             self.source
                 .get(start)
@@ -3209,10 +3219,7 @@ impl TranscriptView {
             let end = (at + 1..current_end)
                 .find(|&i| self.source[i].first)
                 .unwrap_or(current_end);
-            let text: String = self.source[at..end]
-                .iter()
-                .map(|r| r.text.as_str())
-                .collect();
+            let text: String = self.source[at..end].iter().map(Row::display_text).collect();
             self.prepare_reveal(at, end, &text, true, now, cx.reduce_motion());
         }
         let candidate = (current_turn..current_end).rev().find(|&i| {
@@ -3270,7 +3277,7 @@ impl TranscriptView {
             && (self.source[current_turn..current_end].iter().any(|row| {
                 row.role == "tool"
                     && row.first
-                    && serde_json::from_str::<ToolCall>(&row.text)
+                    && serde_json::from_str::<ToolCall>(row.display_text())
                         .is_ok_and(|call| matches!(call.panel(), Some(Panel::Agent(_))))
             }) || self.rows.iter().any(|row| {
                 self.messages
@@ -3367,10 +3374,7 @@ impl TranscriptView {
             }
             let role = self.source[at].role.clone();
             let is_prompt = self.source[at].is_prompt();
-            let text: String = self.source[at..end]
-                .iter()
-                .map(|r| r.text.as_str())
-                .collect();
+            let text: String = self.source[at..end].iter().map(Row::display_text).collect();
             // Older native versions saved user cancellation as an error row.
             let stopped_notice = role == "error" && text.trim() == "Stopped";
             let (display_text, attachments) = if role == "user" {
@@ -3794,7 +3798,7 @@ impl TranscriptView {
                 for text in text_rows.into_iter().take(shown) {
                     self.rows.push(UiRow {
                         key: (0, 0),
-                        body: Body::Plain(text.into()),
+                        body: Body::Plain(String::from(text).into()),
                         message,
                         first: false,
                         last: false,
@@ -4877,7 +4881,7 @@ impl TranscriptView {
             .iter()
             .find(|m| m.role == "user")
             .and_then(|m| self.source.get(m.start))
-            .map(|row| row.text.clone())
+            .map(|row| row.text.to_string())
             .or_else(|| self.pending.first().map(|p| p.text.to_string()))
     }
     fn row_body(

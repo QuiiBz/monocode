@@ -2824,7 +2824,7 @@ fn reinstall_after_eviction(
         let at = view.list.logical_scroll_top();
         let row = &view.rows[at.item_ix];
         (
-            view.source[row.key.0].text.clone(),
+            view.source[row.key.0].text.to_string(),
             row.key.1,
             f32::from(at.offset_in_item),
         )
@@ -2948,4 +2948,75 @@ fn lazy_closed_work_restores_groups_and_preserves_the_visible_tail(cx: &mut Test
         view.rebuild(0, cx);
         assert_eq!(groups(view), [1, 5]);
     });
+}
+
+#[gpui::test]
+fn deferred_tool_output_is_used_only_when_a_tool_row_is_painted(cx: &mut TestAppContext) {
+    let mut store =
+        monocode_core::store::Store::open_monocode(std::path::Path::new(":memory:")).unwrap();
+    let session = store.create("codex", "/project").unwrap();
+    let mut call = ToolCall::new("read", "Read");
+    call.state = ToolState::Failed;
+    call.input = serde_json::json!({"file_path":"src/lib.rs"}).to_string();
+    call.output = "Saved tool error 🙂".repeat(2048);
+    let expected = call.output.clone();
+    let rows = vec![
+        row("user", "Read the source"),
+        row("tool", &serde_json::to_string(&call).unwrap()),
+        row("assistant", "The read failed"),
+    ];
+    store.write_rows(session.id, 0, &rows).unwrap();
+    let prepared =
+        PreparedHistory::new(store.load_session(session.id).unwrap().history.rows, false);
+    let snapshot = prepared.shared_rows();
+    let window = chat_mode(cx, false);
+    window
+        .update(cx, |view, _, cx| {
+            view.visible = false;
+            view.install_prepared_history(prepared, cx);
+            assert!(view.tool_details.is_empty());
+        })
+        .unwrap();
+    render(window, cx);
+    window
+        .update(cx, |view, _, cx| {
+            assert!(view.tool_details.is_empty());
+            assert!(!snapshot[1].text.is_materialized());
+            view.work_folds.insert(1, true);
+            view.rebuild(1, cx);
+            view.toggle_phase(1, true, cx);
+            assert!(view.tool_details.is_empty());
+        })
+        .unwrap();
+    render(window, cx);
+    window
+        .update(cx, |view, _, cx| {
+            assert_eq!(view.tool_details[&1].output, expected);
+            assert!(!snapshot[1].text.is_materialized());
+            view.restore_history(Vec::new(), cx);
+            assert!(view.tool_details.is_empty());
+            view.restore_history(snapshot.as_ref().clone(), cx);
+        })
+        .unwrap();
+    render(window, cx);
+    window
+        .update(cx, |view, _, cx| {
+            assert_eq!(view.tool_details[&1].output, expected);
+            let mut changed = call.clone();
+            changed.output = "A newer error".into();
+            view.patch(
+                1,
+                vec![row("tool", &serde_json::to_string(&changed).unwrap())],
+                cx,
+            );
+            assert!(view.tool_details.is_empty());
+        })
+        .unwrap();
+    render(window, cx);
+    window
+        .update(cx, |view, _, cx| {
+            assert!(view.suspend_history(cx));
+            assert!(view.tool_details.is_empty());
+        })
+        .unwrap();
 }

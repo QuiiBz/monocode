@@ -452,14 +452,14 @@ pub fn rotation_brief(rows: &[Row]) -> String {
     for row in rows {
         if row.is_prompt() {
             if row.first || exchanges.is_empty() {
-                exchanges.push((row.text.clone(), String::new()));
+                exchanges.push((row.text.to_string(), String::new()));
             } else if let Some(last) = exchanges.last_mut() {
                 last.0.push_str(&row.text);
             }
         } else if row.role == "assistant" {
             if let Some(last) = exchanges.last_mut() {
                 if row.first {
-                    last.1 = row.text.clone();
+                    last.1 = row.text.to_string();
                 } else {
                     last.1.push_str(&row.text);
                 }

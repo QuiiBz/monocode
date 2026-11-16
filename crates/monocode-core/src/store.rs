@@ -755,7 +755,7 @@ impl Store {
             .query_map([session], |r| {
                 Ok(Row {
                     role: r.get(0)?,
-                    text: r.get(1)?,
+                    text: r.get::<_, String>(1)?.into(),
                     first: r.get(2)?,
                     sent_at: r
                         .get::<_, Option<i64>>(3)?
@@ -818,7 +818,7 @@ impl Store {
                     session,
                     (start + offset) as i64,
                     row.role,
-                    row.text,
+                    row.text.as_str(),
                     row.first,
                     row.sent_at.and_then(|at| i64::try_from(at).ok())
                 ])

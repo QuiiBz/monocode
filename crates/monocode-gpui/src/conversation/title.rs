@@ -257,7 +257,7 @@ mod tests {
             tool.output = "https://github.com/acme/app/pull/1370".into();
             let row = |role: &str, tool: &ToolCall| Row {
                 role: role.into(),
-                text: serde_json::to_string(tool).unwrap(),
+                text: serde_json::to_string(tool).unwrap().into(),
                 first: true,
                 sent_at: None,
             };

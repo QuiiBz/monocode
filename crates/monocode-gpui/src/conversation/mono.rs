@@ -281,7 +281,7 @@ impl Conversation {
         }
         let row = monocode_core::transcript::Row {
             role: "mono-card".into(),
-            text: value.to_string(),
+            text: value.to_string().into(),
             first: true,
             sent_at: self.transcript.read(cx).source_rows()[index].sent_at,
         };
@@ -335,7 +335,7 @@ impl Conversation {
         posted.begin(role);
         if role == "mono-card" {
             // Card JSON is one metadata row, including large summaries.
-            posted.rows[0].text = text;
+            posted.rows[0].text = text.into();
         } else {
             // Match the store's row boundaries so the next post starts after
             // the complete report, even when it spans multiple display rows.

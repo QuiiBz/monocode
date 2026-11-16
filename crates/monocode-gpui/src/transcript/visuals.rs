@@ -180,7 +180,7 @@ mod tests {
     fn row(role: &str, text: String) -> Row {
         Row {
             role: role.into(),
-            text,
+            text: text.into(),
             first: true,
             sent_at: None,
         }

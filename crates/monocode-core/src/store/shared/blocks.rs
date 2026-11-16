@@ -119,6 +119,9 @@ fn tool(block: &Value) -> ToolCall {
     }
 }
 fn project_content(block: &Value) -> Result<Vec<Row>, String> {
+    project_content_with_tools(block, false)
+}
+fn project_content_with_tools(block: &Value, defer_tools: bool) -> Result<Vec<Row>, String> {
     if block["draft"] == true || (block["internal"] == true && block["role"] != "user") {
         return Ok(Vec::new());
     }
@@ -161,7 +164,11 @@ fn project_content(block: &Value) -> Result<Vec<Row>, String> {
             call.bound_output();
         }
         t.begin("tool");
-        t.rows[0].text = super::encode(&call)?;
+        t.rows[0].text = if defer_tools {
+            crate::transcript::RowText::tool(call)?
+        } else {
+            super::encode(&call)?.into()
+        };
     } else {
         if text.is_empty()
             && (!matches!(role, "user" | "assistant" | "reasoning")
@@ -188,16 +195,19 @@ fn project_content(block: &Value) -> Result<Vec<Row>, String> {
 fn metadata_row(role: &str, value: &Value) -> Row {
     Row {
         role: role.into(),
-        text: value.to_string(),
+        text: value.to_string().into(),
         first: true,
         sent_at: None,
     }
 }
 fn project_block(block: &Value) -> Result<Vec<Row>, String> {
+    project_block_with_tools(block, false)
+}
+fn project_block_with_tools(block: &Value, defer_tools: bool) -> Result<Vec<Row>, String> {
     if block["draft"] == true || (block["internal"] == true && block["role"] != "user") {
         return Ok(Vec::new());
     }
-    let mut rows = project_content(block)?;
+    let mut rows = project_content_with_tools(block, defer_tools)?;
     if block["role"] == "user"
         && (block["nativeRemoteAttachments"] == true
             || block["attachments"]
@@ -241,6 +251,9 @@ pub(crate) fn project(blocks: &[Value]) -> Result<Vec<Row>, String> {
         rows.extend(project_block(block)?);
     }
     Ok(rows)
+}
+pub(super) fn project_for_view(block: &Value) -> Result<Vec<Row>, String> {
+    project_block_with_tools(block, true)
 }
 fn update(old: Option<&Value>, rows: &[Row]) -> Result<Value, String> {
     let mut block = old
@@ -603,7 +616,7 @@ mod panel_tests {
     fn row(call: &ToolCall) -> Row {
         Row {
             role: "tool".into(),
-            text: serde_json::to_string(call).unwrap(),
+            text: serde_json::to_string(call).unwrap().into(),
             first: true,
             sent_at: Some(123),
         }
@@ -701,7 +714,7 @@ mod card_tests {
         let mut card = rows[5].clone();
         let mut value: Value = serde_json::from_str(&card.text).unwrap();
         value["title"] = json!("Live title");
-        card.text = value.to_string();
+        card.text = value.to_string().into();
         let patched = merge(&merged, 5, &[card]).unwrap();
         assert_eq!(patched[2]["monoCard"]["sessionId"], "app-child");
     }
@@ -825,7 +838,7 @@ mod tool_presentation_tests {
         call.state = ToolState::Completed;
         let row = Row {
             role: "tool".into(),
-            text: serde_json::to_string(&call).unwrap(),
+            text: serde_json::to_string(&call).unwrap().into(),
             first: true,
             sent_at: None,
         };
