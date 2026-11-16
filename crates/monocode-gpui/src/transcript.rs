@@ -1010,7 +1010,7 @@ impl TranscriptView {
         };
         self.turns.entry(turn).or_default().provider_turn_id = Some(id);
     }
-    pub(crate) fn response_rows(&self, turn: usize) -> (Vec<Row>, Vec<Row>) {
+    pub(crate) fn response_rows(&self, turn: usize) -> (&[Row], &[Row]) {
         let end = (turn..self.source.len())
             .find(|&i| {
                 self.source[i].is_prompt() && !(self.mono && self.mono_next_run_continues(turn, i))
@@ -1023,10 +1023,7 @@ impl TranscriptView {
         while start > 0 && !self.source[start].first {
             start -= 1;
         }
-        (
-            self.source[start..end].to_vec(),
-            self.source[..end].to_vec(),
-        )
+        (&self.source[start..end], &self.source[..end])
     }
     pub(crate) fn note_result(
         &mut self,
@@ -2354,7 +2351,7 @@ impl TranscriptView {
                 .into_any_element();
         }
         let (rows, _) = self.response_rows(turn);
-        let output = monocode_core::response::prose(&rows);
+        let output = monocode_core::response::prose(rows);
         if self.mono {
             return self.mono_actions(turn, output, before_user, cx);
         }

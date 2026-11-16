@@ -10,6 +10,40 @@ fn row(role: &str, text: &str) -> Row {
     }
 }
 
+#[test]
+fn response_rows_borrow_history_and_preserve_turn_boundaries() {
+    let mut view = TranscriptView::new();
+    view.source = vec![
+        row("user", "Earlier prompt"),
+        row("tool", &"output".repeat(200_000)),
+        row("assistant", "Earlier answer"),
+        row("user", "Current prompt"),
+        Row {
+            first: false,
+            ..row("user", " continued")
+        },
+        row("tool", "Current output"),
+        row("assistant", "Current answer"),
+        Row {
+            first: false,
+            ..row("assistant", " continued")
+        },
+        row("user", "Later prompt"),
+        row("assistant", "Later answer"),
+    ];
+
+    for (turn, start, end, expected) in [
+        (1, 0, 3, "Earlier answer"),
+        (5, 3, 8, "Current answer continued"),
+        (9, 8, 10, "Later answer"),
+    ] {
+        let (response, through) = view.response_rows(turn);
+        assert!(std::ptr::eq(response, &view.source[start..end]));
+        assert!(std::ptr::eq(through, &view.source[..end]));
+        assert_eq!(monocode_core::response::prose(response), expected);
+    }
+}
+
 fn chat(cx: &mut TestAppContext) -> gpui::WindowHandle<TranscriptView> {
     chat_mode(cx, true)
 }
