@@ -225,6 +225,7 @@ pub(crate) struct Conversation {
     git_action_anchor: AnchorSlot,
     /// Files this session's edit tools changed, across its whole history.
     session_edits: Vec<String>,
+    session_edits_loading: Option<gpui::Task<()>>,
     /// Where `session_edits` stand in Git: uncommitted ones show the pill.
     session_git: monocode_core::git::SessionChanges,
     /// The session's latest action commit is on no remote yet: the pill offers Push.
@@ -671,6 +672,7 @@ impl Conversation {
             workspace_anchor: AnchorSlot::default(),
             git_action_anchor: AnchorSlot::default(),
             session_edits: Vec::new(),
+            session_edits_loading: None,
             session_git: Default::default(),
             session_unpushed: false,
             session_edits_generation: 0,
@@ -729,20 +731,12 @@ impl Conversation {
         let id = self.summary.id;
         let mono = self.settings.mono.is_some();
         let work = cx.background_executor().spawn(async move {
-            let loaded = locked(&store).and_then(|store| {
-                let loaded = store.load_session(id)?;
-                let edits = if mono {
-                    Vec::new()
-                } else {
-                    git_actions::restored_session_edits(&store, id, &loaded.history.rows)?
-                };
-                Ok((loaded, edits))
-            });
+            let loaded = locked(&store).and_then(|store| store.load_session(id));
             let (history, settings, follow_ups) = match loaded {
-                Ok((loaded, edits)) => (
-                    Ok((
-                        crate::transcript::PreparedHistory::new(loaded.history.rows, mono),
-                        edits,
+                Ok(loaded) => (
+                    Ok(crate::transcript::PreparedHistory::new(
+                        loaded.history.rows,
+                        mono,
                     )),
                     loaded.settings,
                     loaded.follow_ups,
@@ -815,15 +809,17 @@ impl Conversation {
                     this.settings.environment = environment;
                 }
                 match result {
-                    Ok((history, edits)) => {
-                        this.remember_session_edits(edits);
+                    Ok(history) => {
+                        let rows = history.shared_rows();
+                        let before = before.ok().flatten();
                         let pager = this.history_pager();
                         this.transcript.update(cx, |v, cx| {
                             v.install_prepared_history(history, cx);
-                            v.set_history_pager(before.ok().flatten(), Some(pager));
+                            v.set_history_pager(before, Some(pager));
                         });
                         this.status = "Ready".into();
                         this.loaded = true;
+                        this.restore_session_edits(rows, before, cx);
                         if let Some((row, query)) = this.pending_search.take() {
                             this.reveal_search(row, query, cx);
                         }

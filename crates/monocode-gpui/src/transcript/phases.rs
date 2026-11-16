@@ -28,6 +28,20 @@ impl Phases {
 }
 
 pub(crate) fn collect(rows: &[Row], from: usize, streaming: bool) -> Phases {
+    collect_visible(rows, from, streaming, |_| false)
+}
+
+#[derive(serde::Deserialize)]
+struct CallState {
+    state: ToolState,
+}
+
+pub(crate) fn collect_visible(
+    rows: &[Row],
+    from: usize,
+    streaming: bool,
+    mut folded: impl FnMut(usize) -> bool,
+) -> Phases {
     let mut result = Phases::default();
     let mut members = Vec::new();
     let mut calls = Vec::new();
@@ -61,6 +75,17 @@ pub(crate) fn collect(rows: &[Row], from: usize, streaming: bool) -> Phases {
             .find(|&i| rows[i].first)
             .unwrap_or(rows.len());
         let role = rows[at].role.as_str();
+        // Failed and cancelled agent reports stay visible inside closed work.
+        if role == "tool"
+            && folded(at)
+            && live_turn.is_none_or(|turn| at < turn)
+            && serde_json::from_str::<CallState>(&rows[at].text)
+                .is_ok_and(|call| !matches!(call.state, ToolState::Failed | ToolState::Cancelled))
+        {
+            leading = false;
+            at = end;
+            continue;
+        }
         let readable = rows[at..end].iter().any(|r| !r.text.trim().is_empty());
         if matches!(role, "reasoning" | "assistant") && !readable {
             result.hidden.insert(at);
@@ -216,5 +241,46 @@ mod tests {
         let group = phases.at(5).unwrap();
         assert_eq!((group.start, group.last, group.steps), (5, 6, 2));
         assert!(!phases.hidden.contains(&5));
+    }
+
+    #[test]
+    fn folded_calls_skip_summaries_and_keep_failed_agents_and_visible_groups() {
+        let mut completed = ToolCall::new("read", "Read");
+        completed.state = ToolState::Completed;
+        completed.output = r#"{"state":"failed","panel":{"kind":"agent"}}"#.repeat(1024);
+        let mut agent = ToolCall::new("agent", "Agent");
+        agent.state = ToolState::Failed;
+        agent.input = r#"{"description":"Review the change"}"#.into();
+        let rows = [
+            row("user", "Check"),
+            row("tool", &serde_json::to_string_pretty(&completed).unwrap()),
+            row("tool", &serde_json::to_string_pretty(&agent).unwrap()),
+            row("assistant", "Done"),
+            tool(),
+        ];
+        let phases = collect_visible(&rows, 0, false, |at| at < 3);
+        assert!(phases.at(1).is_none());
+        assert!(phases.pinned.contains(&2));
+        assert_eq!(phases.at(4).unwrap().calls.len(), 1);
+    }
+
+    #[test]
+    fn folded_live_agents_keep_their_standalone_rows() {
+        for state in [
+            ToolState::Running,
+            ToolState::Completed,
+            ToolState::Cancelled,
+        ] {
+            let mut agent = ToolCall::new("agent", "Agent");
+            agent.state = state;
+            let rows = [
+                row("user", "Check"),
+                row("tool", &serde_json::to_string(&agent).unwrap()),
+                row("assistant", "A reply"),
+            ];
+            let phases = collect_visible(&rows, 0, true, |_| true);
+            assert!(phases.pinned.contains(&1));
+            assert!(phases.at(1).is_none());
+        }
     }
 }

@@ -130,26 +130,19 @@ impl Conversation {
         let store = self.store.clone();
         let mono = self.settings.mono.is_some();
         let work = cx.background_executor().spawn(async move {
-            let (history, turns, before, edits) = {
+            let (history, turns, before) = {
                 let store = locked(&store)?;
                 let loaded = store.load_session(id)?;
-                let edits = if mono {
-                    Vec::new()
-                } else {
-                    crate::runtime::edited_paths(&loaded.history.rows)
-                };
                 (
                     loaded.history,
                     loaded.settings?.unwrap_or_default().turns,
                     store.history_before(id)?,
-                    edits,
                 )
             };
             Ok::<_, String>((
                 crate::transcript::PreparedHistory::new(history.rows, mono),
                 turns,
                 before,
-                edits,
             ))
         });
         cx.spawn(async move |this, cx| {
@@ -157,8 +150,8 @@ impl Conversation {
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok((history, turns, before, edits)) => {
-                        this.remember_session_edits(edits);
+                    Ok((history, turns, before)) => {
+                        let rows = history.shared_rows();
                         this.settings.turns = turns.clone();
                         let pager = this.history_pager();
                         this.transcript.update(cx, |view, cx| {
@@ -167,6 +160,7 @@ impl Conversation {
                             view.set_history_pager(before, Some(pager));
                         });
                         this.history_unloaded = false;
+                        this.restore_session_edits(rows, before, cx);
                         this.refresh_review(cx);
                         this.status = "Ready".into();
                         if let Some((row, query)) = this.pending_search.take() {

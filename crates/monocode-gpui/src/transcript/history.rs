@@ -10,7 +10,7 @@ pub(crate) type HistoryPager = Arc<dyn Fn(i64, bool) -> Result<HistoryPage, Stri
 /// Keep source row indices intact for persistence, tools and live patches.
 /// Only the displayed window needs Markdown and presentation objects.
 pub(crate) struct PreparedHistory {
-    rows: Vec<Row>,
+    rows: Arc<Vec<Row>>,
     parsers: HashMap<usize, MarkdownParser>,
 }
 impl PreparedHistory {
@@ -22,7 +22,13 @@ impl PreparedHistory {
             0
         };
         let parsers = prepare_parsers(&rows[start..], start, mono);
-        Self { rows, parsers }
+        Self {
+            rows: Arc::new(rows),
+            parsers,
+        }
+    }
+    pub(crate) fn shared_rows(&self) -> Arc<Vec<Row>> {
+        self.rows.clone()
     }
 }
 
@@ -71,7 +77,17 @@ impl TranscriptView {
             return;
         }
         self.prepared_parsers = history.parsers;
-        self.patch(0, history.rows, cx);
+        if self.source.is_empty() && !history.rows.is_empty() {
+            self.source = history.rows;
+            self.source_bytes = self
+                .source
+                .iter()
+                .map(|row| row.text.capacity().saturating_add(row.role.capacity()))
+                .sum();
+            self.rows_patched(0, 0, cx);
+        } else {
+            self.patch(0, Arc::unwrap_or_clone(history.rows), cx);
+        }
     }
 
     /// Where turns above the loaded rows come from. A paged Mono loads only
@@ -219,12 +235,13 @@ impl TranscriptView {
             }
         }
         self.base += k;
+        self.make_source_unique();
         self.source_bytes = page.rows.iter().fold(self.source_bytes, |bytes, row| {
             bytes.saturating_add(row.text.capacity().saturating_add(row.role.capacity()))
         });
         let mut source = page.rows;
-        source.append(&mut self.source);
-        self.source = source;
+        source.append(Arc::make_mut(&mut self.source));
+        self.source = Arc::new(source);
         for (turn, info) in page.turns {
             self.turns.entry(turn).or_insert(info);
         }
@@ -409,7 +426,7 @@ impl TranscriptView {
             offset,
             following: self.list.is_following_tail(),
         });
-        self.source = Vec::new();
+        self.source = Arc::default();
         self.source_bytes = 0;
         self.history_start = 0;
         self.history_loading = false;
@@ -460,7 +477,7 @@ impl TranscriptView {
         let position = self.history_position.take();
         self.drop_older_history();
         // Reopening also handles a source that became empty in another window.
-        self.source = Vec::new();
+        self.source = Arc::default();
         self.source_bytes = 0;
         self.messages = Vec::new();
         self.rows = Vec::new();
@@ -494,6 +511,31 @@ impl TranscriptView {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn loaded_rows_are_shared_until_a_live_patch_changes_them(cx: &mut TestAppContext) {
+        let prepared = PreparedHistory::new(long_mono(2), false);
+        let snapshot = prepared.shared_rows();
+        let saved = snapshot.last().unwrap().text.clone();
+        let view = cx.new(|_| TranscriptView::new());
+        view.update(cx, |view, cx| {
+            view.install_prepared_history(prepared, cx);
+            assert!(Arc::ptr_eq(&view.source, &snapshot));
+            let at = view.source.len() - 1;
+            let mut changed = view.source[at].clone();
+            changed.text = "A newer reply".into();
+            view.patch(at, vec![changed], cx);
+            assert_eq!(snapshot[at].text, saved);
+            assert_eq!(view.source[at].text, "A newer reply");
+            assert_eq!(
+                view.source_bytes,
+                view.source
+                    .iter()
+                    .map(|row| { row.text.capacity() + row.role.capacity() })
+                    .sum::<usize>()
+            );
+        });
+    }
 
     fn long_mono(turns: usize) -> Vec<Row> {
         (0..turns).flat_map(|turn| [

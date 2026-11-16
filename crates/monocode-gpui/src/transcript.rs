@@ -682,7 +682,7 @@ pub(crate) struct TranscriptView {
     selection_focus: Option<gpui::FocusHandle>,
     links: links::State,
     work_item_cards: user_links::Cards,
-    source: Vec<Row>,
+    source: Arc<Vec<Row>>,
     source_bytes: usize,
     attachment_images: HashMap<String, gpui::Entity<attachments::Photo>>,
     visuals: HashMap<usize, visuals::CachedVisual>,
@@ -2546,7 +2546,7 @@ impl TranscriptView {
             selection_focus: None,
             links: Default::default(),
             work_item_cards: Default::default(),
-            source: Vec::new(),
+            source: Arc::default(),
             source_bytes: 0,
             attachment_images: HashMap::new(),
             visuals: HashMap::new(),
@@ -2705,8 +2705,8 @@ impl TranscriptView {
             .iter()
             .rposition(Row::is_prompt)
             .map_or(0, |at| at + 1);
-        for row in self
-            .source
+        self.make_source_unique();
+        for row in Arc::make_mut(&mut self.source)
             .iter_mut()
             .skip(start)
             .filter(|row| row.role == "tool")
@@ -2976,6 +2976,15 @@ impl TranscriptView {
     pub(crate) fn patch(&mut self, start: usize, rows: Vec<Row>, cx: &mut Context<Self>) {
         self.patch_view(self.base + start, rows, cx);
     }
+    fn make_source_unique(&mut self) {
+        if Arc::strong_count(&self.source) > 1 {
+            let source = Arc::make_mut(&mut self.source);
+            self.source_bytes = source
+                .iter()
+                .map(|row| row.text.capacity().saturating_add(row.role.capacity()))
+                .sum();
+        }
+    }
     fn patch_view(&mut self, start: usize, rows: Vec<Row>, cx: &mut Context<Self>) {
         if rows.is_empty() {
             return;
@@ -2985,20 +2994,25 @@ impl TranscriptView {
             "transcript patches must be contiguous"
         );
         let known = self.source.len();
+        self.make_source_unique();
+        let source = Arc::make_mut(&mut self.source);
         for (ix, row) in rows.into_iter().enumerate() {
             let ix = start + ix;
             let bytes = row.text.capacity().saturating_add(row.role.capacity());
-            if ix < self.source.len() {
-                let old = &self.source[ix];
+            if ix < source.len() {
+                let old = &source[ix];
                 self.source_bytes = self
                     .source_bytes
                     .saturating_sub(old.text.capacity().saturating_add(old.role.capacity()));
-                self.source[ix] = row;
+                source[ix] = row;
             } else {
-                self.source.push(row);
+                source.push(row);
             }
             self.source_bytes = self.source_bytes.saturating_add(bytes);
         }
+        self.rows_patched(start, known, cx);
+    }
+    fn rows_patched(&mut self, start: usize, known: usize, cx: &mut Context<Self>) {
         self.visuals.retain(|&start, _| {
             self.source
                 .get(start)
@@ -3327,10 +3341,14 @@ impl TranscriptView {
             .map(|m| (m.start, m))
             .collect();
         self.rows.truncate(display_start);
+        let folded = self.folded_work_ranges(source_start);
         let activity = if self.mono {
             phases::Phases::default()
         } else {
-            phases::collect(&self.source, source_start, self.streaming)
+            phases::collect_visible(&self.source, source_start, self.streaming, |at| {
+                let index = folded.partition_point(|range| range.end <= at);
+                folded.get(index).is_some_and(|range| range.contains(&at))
+            })
         };
         let mut at = source_start;
         let mut turn = 0;
@@ -3341,6 +3359,7 @@ impl TranscriptView {
         let mut ready = false;
         let mut git_card: Option<Arc<git_turns::GitCard>> = None;
         let mut git_live_shown = false;
+        let last_prompt = self.source.iter().rposition(Row::is_prompt);
         while at < self.source.len() {
             let mut end = at + 1;
             while end < self.source.len() && !self.source[end].first {
@@ -3848,7 +3867,6 @@ impl TranscriptView {
                 attachments,
                 prompt_fingerprint,
             });
-            let last_prompt = self.source.iter().rposition(|r| r.is_prompt());
             if self.mono
                 && is_prompt
                 && self.mono_pending_joins_live_turn()
@@ -4172,6 +4190,37 @@ impl TranscriptView {
             paced.settle(now);
         }
         paced.step(now, self.streaming && end == self.source.len());
+    }
+    fn folded_work_ranges(&self, from: usize) -> Vec<std::ops::Range<usize>> {
+        let mut folded = Vec::new();
+        if self.mono || !self.fold_work {
+            return folded;
+        }
+        let mut turn = self.source[..from]
+            .iter()
+            .rposition(Row::is_prompt)
+            .map_or(0, |at| at + 1);
+        while turn < self.source.len() {
+            if self.source[turn].is_prompt() {
+                turn += 1;
+                continue;
+            }
+            let end = (turn..self.source.len())
+                .find(|&at| self.source[at].is_prompt())
+                .unwrap_or(self.source.len());
+            if !self.work_folds.get(&turn).copied().unwrap_or(false)
+                && let Some(answer) = (turn..end).rev().find(|&at| {
+                    self.source[at].role == "assistant"
+                        && self.source[at].first
+                        && self.answer_visible(at)
+                })
+                && from.max(turn) < answer
+            {
+                folded.push(from.max(turn)..answer);
+            }
+            turn = end;
+        }
+        folded
     }
     fn answer_visible(&self, answer: usize) -> bool {
         if self.source[answer].text.trim().is_empty() {
@@ -7742,7 +7791,7 @@ mod scroll_tests {
                 assert!((bounds.top() - view.viewport.top()).abs() < px(1.));
                 view.list.scroll_by(px(-100.));
                 let offset = view.list.logical_scroll_top();
-                view.patch(0, view.source.clone(), cx);
+                view.patch(0, view.source.as_ref().clone(), cx);
                 assert!(
                     !view.list.is_following_tail(),
                     "a replay must respect the reader's scroll"

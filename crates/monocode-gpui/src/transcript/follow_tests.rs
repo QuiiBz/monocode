@@ -30,7 +30,8 @@ fn response_rows_borrow_history_and_preserve_turn_boundaries() {
         },
         row("user", "Later prompt"),
         row("assistant", "Later answer"),
-    ];
+    ]
+    .into();
 
     for (turn, start, end, expected) in [
         (1, 0, 3, "Earlier answer"),
@@ -423,7 +424,7 @@ fn mono_steered_bubbles_align_and_stay_together_after_the_answer_and_reload(
                 view.streaming(false, cx);
                 assert_group(view);
                 (
-                    view.source.clone(),
+                    view.source.as_ref().clone(),
                     serde_json::to_string(&view.turns).unwrap(),
                 )
             })
@@ -1585,7 +1586,13 @@ fn mono_notifications_show_only_the_final_message_live_and_after_reload(cx: &mut
                     "a later report preserves the earlier final reply"
                 );
                 assert!(visible(view, report));
-                (view.source.clone(), opening, progress, answer, report)
+                (
+                    view.source.as_ref().clone(),
+                    opening,
+                    progress,
+                    answer,
+                    report,
+                )
             });
 
             let reloaded = cx.new(|_| {
@@ -2887,4 +2894,58 @@ fn a_reinstalled_history_keeps_following_the_tail(cx: &mut TestAppContext) {
         assert!(same, "the list stopped following the tail at {after:?}");
         assert!(consumed, "the suspended position is still pending");
     }
+}
+
+#[gpui::test]
+fn lazy_closed_work_restores_groups_and_preserves_the_visible_tail(cx: &mut TestAppContext) {
+    let view = cx.new(|_| TranscriptView::new());
+    view.update(cx, |view, cx| {
+        view.visible = false;
+        view.install_prepared_history(
+            PreparedHistory::new(
+                vec![
+                    row("user", "Check"),
+                    tool(1, true),
+                    row("reasoning", "Review the results"),
+                    tool(2, true),
+                    row("assistant", "The answer"),
+                    tool(3, true),
+                ],
+                false,
+            ),
+            cx,
+        );
+        let groups = |view: &TranscriptView| {
+            view.rows
+                .iter()
+                .filter_map(|row| match row.body {
+                    Body::Phase { group, .. } => Some(group),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(groups(view), [5]);
+        let folded_ranges = view.folded_work_ranges(2);
+        assert_eq!(folded_ranges.len(), 1);
+        assert_eq!(folded_ranges[0], 2..4);
+        view.work_folds.insert(1, true);
+        view.rebuild(1, cx);
+        assert_eq!(groups(view), [1, 5]);
+        view.toggle_phase(1, true, cx);
+        let calls: Vec<_> = view
+            .rows
+            .iter()
+            .filter_map(|row| match &row.body {
+                Body::Tool { call, .. } => Some(call.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, ["1", "2"]);
+        view.work_folds.insert(1, false);
+        view.rebuild(1, cx);
+        assert_eq!(groups(view), [5]);
+        view.fold_work = false;
+        view.rebuild(0, cx);
+        assert_eq!(groups(view), [1, 5]);
+    });
 }

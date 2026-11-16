@@ -551,15 +551,22 @@ impl ToolCall {
         if let Some(panel) = &self.panel {
             return Some(panel.clone());
         }
-        let input: Value = serde_json::from_str(&self.input).unwrap_or_default();
+        let parsed_input = std::cell::OnceCell::new();
+        let input = || {
+            parsed_input
+                .get_or_init(|| serde_json::from_str::<Value>(&self.input).unwrap_or_default())
+        };
         let name = self.name.to_lowercase().replace([' ', '-', '_'], "");
         if ["todowrite", "writetodos", "updatetodos", "updateplan"]
             .iter()
             .any(|suffix| name == *suffix || name.ends_with(&format!(":{suffix}")))
         {
-            return TaskList::from_value(&input).map(Panel::Tasks);
+            return TaskList::from_value(input()).map(Panel::Tasks);
         }
-        let display = self.display.as_ref().unwrap_or(&input["__desktop"]);
+        let display = self
+            .display
+            .as_ref()
+            .unwrap_or_else(|| &input()["__desktop"]);
         let title = display["title"].as_str().unwrap_or(&self.name);
         let kind = display["kind"].as_str();
         let native_agent = matches!(
@@ -570,7 +577,7 @@ impl ToolCall {
             "agent" | "task" | "subagent"
         );
         if is_agent_tool(kind, title) || native_agent {
-            let mut run = AgentRun::from_input(&input);
+            let mut run = AgentRun::from_input(input());
             if run.name.is_none() && run.brief.is_empty() {
                 run.brief = title.into();
             }
@@ -814,6 +821,27 @@ mod tests {
         tool.name = "TodoWrite".into();
         tool.input = "[x] Not structured".into();
         assert_eq!(tool.panel(), None);
+    }
+    #[test]
+    fn explicit_display_keeps_task_and_agent_arguments() {
+        let mut call = ToolCall::new("tasks", "mcp:TodoWrite");
+        call.display = Some(json!({"kind":"other", "title":"Update tasks"}));
+        call.input = json!({"todos":[{"content":"Inspect source","status":"pending"}]}).to_string();
+        let Some(Panel::Tasks(list)) = call.panel() else {
+            panic!()
+        };
+        assert_eq!(list.items[0].text, "Inspect source");
+
+        call.name = "Agent".into();
+        call.display = Some(json!({"kind":"agent", "title":"Start review"}));
+        call.input =
+            json!({"name":"Reviewer", "prompt":"Check correctness", "model":"child"}).to_string();
+        let Some(Panel::Agent(run)) = call.panel() else {
+            panic!()
+        };
+        assert_eq!(run.name.as_deref(), Some("Reviewer"));
+        assert_eq!(run.brief, "Check correctness");
+        assert_eq!(run.model.as_deref(), Some("child"));
     }
     #[test]
     fn panels_roundtrip_and_old_calls_deserialize() {

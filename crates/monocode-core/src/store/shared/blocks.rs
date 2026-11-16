@@ -6,45 +6,53 @@ use crate::{
 };
 use serde_json::{json, Value};
 
+fn tool_presentation(source: &Value) -> Option<Value> {
+    let fields = source.as_object()?;
+    Some(Value::Object(
+        fields
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "detail" | "rawOutput" | "raw_output" | "nativeInput" | "nativePresentation"
+                )
+            })
+            .map(|(key, value)| {
+                let value = if key == "preview" {
+                    value.as_object().map(|preview| {
+                        Value::Object(
+                            preview
+                                .iter()
+                                .filter(|(key, _)| key.as_str() != "output")
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect(),
+                        )
+                    })
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| value.clone());
+                (key.clone(), value)
+            })
+            .collect(),
+    ))
+}
+
 fn tool(block: &Value) -> ToolCall {
     let meta = &block["tool"];
     let preview = &meta["preview"];
     // Rich display metadata must supplement even a sparse nativeInput without
     // changing the recorded arguments. Older native envelopes remain readable.
-    let native = meta["nativeInput"]
-        .as_str()
-        .and_then(|text| serde_json::from_str::<Value>(text).ok());
-    let mut presentation = meta
+    let display = meta
         .get("nativePresentation")
-        .filter(|value| value.is_object())
-        .cloned()
+        .and_then(tool_presentation)
         .or_else(|| {
-            native
-                .as_ref()
-                .and_then(|value| value.get("__desktop"))
-                .filter(|value| value.is_object())
-                .cloned()
+            meta["nativeInput"]
+                .as_str()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                .and_then(|input| tool_presentation(&input["__desktop"]))
         })
-        .unwrap_or_else(|| meta.clone());
-    if let Some(fields) = presentation.as_object_mut() {
-        // Output is separately bounded for display; the source block retains its
-        // complete payload. Avoid recursively embedding prior native metadata.
-        for key in [
-            "detail",
-            "rawOutput",
-            "raw_output",
-            "nativeInput",
-            "nativePresentation",
-        ] {
-            fields.remove(key);
-        }
-    }
-    if let Some(preview) = presentation
-        .get_mut("preview")
-        .and_then(Value::as_object_mut)
-    {
-        preview.remove("output");
-    }
+        .or_else(|| tool_presentation(meta));
     let input = meta["nativeInput"]
         .as_str()
         .map(str::to_owned)
@@ -101,7 +109,7 @@ fn tool(block: &Value) -> ToolCall {
         input,
         output,
         panel: tasks::from_desktop(block),
-        display: presentation.is_object().then_some(presentation),
+        display,
         state: match meta["status"].as_str() {
             Some("failed" | "error") => ToolState::Failed,
             Some("cancelled" | "canceled" | "aborted") => ToolState::Cancelled,
@@ -145,7 +153,11 @@ fn project_content(block: &Value) -> Result<Vec<Row>, String> {
             call.name = "update_plan".into();
             call.input = block["taskList"].to_string();
         }
-        if !matches!(call.panel(), Some(tasks::Panel::Agent(_))) {
+        let agent = match &call.panel {
+            Some(panel) => matches!(panel, tasks::Panel::Agent(_)),
+            None => matches!(call.panel(), Some(tasks::Panel::Agent(_))),
+        };
+        if !agent {
             call.bound_output();
         }
         t.begin("tool");
@@ -736,6 +748,27 @@ mod card_tests {
 #[cfg(test)]
 mod tool_presentation_tests {
     use super::*;
+    #[test]
+    fn restored_metadata_preserves_envelopes_and_separate_output() {
+        let legacy = json!({"kind":"read", "title":"Read legacy", "preview":{"path":"legacy.rs", "output":"legacy output"}, "detail":"legacy detail", "future":7});
+        let modern = json!({"kind":"read", "title":"Read modern", "preview":{"path":"modern.rs", "output":"modern output"}, "rawOutput":"modern raw", "future":8});
+        let input = json!({"__desktop":legacy, "rawInput":{"file_path":"actual.rs"}}).to_string();
+        for presentation in [None, Some(modern)] {
+            let mut source = json!({"id":"read", "role":"tool", "tool":{"nativeName":"Read", "nativeInput":input, "detail":"actual output", "preview":{"path":"fallback.rs"}}});
+            let expected = if let Some(presentation) = presentation {
+                source["tool"]["nativePresentation"] = presentation;
+                json!({"kind":"read", "title":"Read modern", "preview":{"path":"modern.rs"}, "future":8})
+            } else {
+                json!({"kind":"read", "title":"Read legacy", "preview":{"path":"legacy.rs"}, "future":7})
+            };
+            let original = source.clone();
+            let call = tool(&source);
+            assert_eq!(call.input, input);
+            assert_eq!(call.output, "actual output");
+            assert_eq!(call.display, Some(expected));
+            assert_eq!(source, original);
+        }
+    }
     #[test]
     fn restored_desktop_read_preserves_path_line_and_rich_source() {
         let source = json!({"id":"read","role":"tool","text":"Read","tool":{"kind":"read","title":"Read","status":"completed","rawInput":{"file_path":"src/nested.rs","offset":18},"preview":{"kind":"read","path":"src/nested.rs","fileName":"nested.rs","startLine":18,"lines":[{"number":18,"text":"fn main() {}"}]},"future":true}});

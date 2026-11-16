@@ -7,14 +7,16 @@
 use super::*;
 
 /// Read older pages without installing their transcript payload in the UI.
-pub(super) fn restored_session_edits(
-    store: &monocode_core::store::Store,
+fn restored_session_edits(
+    store: &Database,
     session: i64,
+    before: Option<i64>,
     rows: &[monocode_core::transcript::Row],
 ) -> Result<Vec<String>, String> {
     let mut paths = crate::runtime::edited_paths(rows);
-    if let Some(before) = store.history_before(session)? {
-        for path in crate::runtime::edited_paths(&store.load_before(session, before, true)?.rows) {
+    if let Some(before) = before {
+        let older = locked(store)?.load_before(session, before, true)?;
+        for path in crate::runtime::edited_paths(&older.rows) {
             if !paths.contains(&path) {
                 paths.push(path);
             }
@@ -143,6 +145,40 @@ impl GitAction {
 }
 
 impl Conversation {
+    pub(super) fn restore_session_edits(
+        &mut self,
+        rows: Arc<Vec<monocode_core::transcript::Row>>,
+        before: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_remote() || self.settings.mono.is_some() {
+            return;
+        }
+        self.session_edits_generation = self.session_edits_generation.wrapping_add(1);
+        let store = self.store.clone();
+        let session = self.summary.id;
+        let cwd = self.execution_cwd().to_owned();
+        let work = cx
+            .background_executor()
+            .spawn(async move { restored_session_edits(&store, session, before, &rows) });
+        self.session_edits_loading = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.session_edits_loading = None;
+                if this.summary.id != session || this.execution_cwd() != cwd {
+                    return;
+                }
+                match result {
+                    Ok(paths) => {
+                        this.remember_session_edits(paths);
+                        this.refresh_git_actions(cx);
+                    }
+                    Err(error) => this.status = error,
+                }
+                cx.notify();
+            });
+        }));
+    }
     pub(super) fn remember_session_edits(&mut self, paths: Vec<String>) {
         for path in paths {
             let path = monocode_core::files::document::resolve_path(
@@ -165,7 +201,12 @@ impl Conversation {
     pub(crate) fn refresh_git_actions(&mut self, cx: &mut Context<Self>) {
         self.session_edits_generation = self.session_edits_generation.wrapping_add(1);
         let generation = self.session_edits_generation;
-        if !self.history_loaded() || self.busy || self.is_remote() || self.settings.mono.is_some() {
+        if !self.history_loaded()
+            || self.session_edits_loading.is_some()
+            || self.busy
+            || self.is_remote()
+            || self.settings.mono.is_some()
+        {
             return;
         }
         if self.session_edits.is_empty() || self.settings.worktree_removed {
@@ -206,6 +247,9 @@ impl Conversation {
     /// unstaged work offers every action, staged work skips Stage, and a
     /// committed but unpushed session offers only Push.
     fn git_offers(&self, cx: &gpui::App) -> Vec<GitAction> {
+        if self.session_edits_loading.is_some() {
+            return Vec::new();
+        }
         let mut offers = if self.session_git.unstaged {
             GitAction::ALL.to_vec()
         } else if self.session_git.staged {
@@ -417,6 +461,81 @@ mod tests {
         transcript::Row,
     };
     use std::sync::Mutex;
+
+    fn saved_edit(path: &str) -> Vec<Row> {
+        let mut call = ToolCall::new("edit", "Edit");
+        call.state = ToolState::Completed;
+        call.input = serde_json::json!({"file_path":path}).to_string();
+        [
+            ("user", "Edit the file".into()),
+            ("tool", serde_json::to_string(&call).unwrap()),
+            ("assistant", "Done".into()),
+        ]
+        .into_iter()
+        .map(|(role, text)| Row {
+            role: role.into(),
+            text,
+            first: true,
+            sent_at: None,
+        })
+        .collect()
+    }
+
+    #[gpui::test]
+    fn history_is_ready_while_edited_files_are_still_loading(cx: &mut TestAppContext) {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut summary = store.create("codex", "/project").unwrap();
+        summary.provider = "fixture".into();
+        summary.has_messages = true;
+        store
+            .write_rows(summary.id, 0, &saved_edit("/project/own.rs"))
+            .unwrap();
+        let chat = cx.new(|cx| Conversation::new(summary, Arc::new(Mutex::new(store)), cx));
+        let ready_before_scan = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed = ready_before_scan.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&chat, move |chat, _: &SessionChanged, cx| {
+                let chat = chat.read(cx);
+                if chat.history_ready() && chat.session_edits_loading.is_some() {
+                    assert!(!chat.transcript.read(cx).source_rows().is_empty());
+                    assert!(chat.git_offers(cx).is_empty());
+                    observed.set(true);
+                }
+            })
+        });
+        chat.update(cx, |chat, cx| chat.load(cx));
+        cx.run_until_parked();
+        assert!(ready_before_scan.get());
+        chat.update(cx, |chat, _| {
+            assert!(chat.history_ready());
+            assert!(chat.session_edits_loading.is_none());
+            assert_eq!(chat.session_edits, ["/project/own.rs"]);
+        });
+    }
+
+    #[gpui::test]
+    fn a_new_scan_replaces_pending_results_and_ignores_a_changed_working_copy(
+        cx: &mut TestAppContext,
+    ) {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let summary = store.create("codex", "/project").unwrap();
+        let chat = cx.new(|cx| Conversation::new(summary, Arc::new(Mutex::new(store)), cx));
+        chat.update(cx, |chat, cx| {
+            chat.restore_session_edits(Arc::new(saved_edit("first.rs")), None, cx);
+            chat.restore_session_edits(Arc::new(saved_edit("second.rs")), None, cx);
+        });
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            assert_eq!(chat.session_edits, ["/project/second.rs"]);
+            chat.restore_session_edits(Arc::new(saved_edit("stale.rs")), None, cx);
+            chat.summary.cwd = "/other".into();
+        });
+        cx.run_until_parked();
+        chat.update(cx, |chat, _| {
+            assert!(chat.session_edits_loading.is_none());
+            assert_eq!(chat.session_edits, ["/project/second.rs"]);
+        });
+    }
 
     struct Repo(std::path::PathBuf);
     impl Repo {
