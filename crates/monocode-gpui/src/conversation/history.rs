@@ -130,18 +130,26 @@ impl Conversation {
         let store = self.store.clone();
         let mono = self.settings.mono.is_some();
         let work = cx.background_executor().spawn(async move {
-            let (history, turns, before) = {
+            let (history, turns, before, edits) = {
                 let store = locked(&store)?;
+                let loaded = store.load_session(id)?;
+                let edits = if mono {
+                    Vec::new()
+                } else {
+                    crate::runtime::edited_paths(&loaded.history.rows)
+                };
                 (
-                    store.load(id)?,
-                    store.agent_settings(id)?.unwrap_or_default().turns,
+                    loaded.history,
+                    loaded.settings?.unwrap_or_default().turns,
                     store.history_before(id)?,
+                    edits,
                 )
             };
             Ok::<_, String>((
                 crate::transcript::PreparedHistory::new(history.rows, mono),
                 turns,
                 before,
+                edits,
             ))
         });
         cx.spawn(async move |this, cx| {
@@ -149,7 +157,8 @@ impl Conversation {
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
-                    Ok((history, turns, before)) => {
+                    Ok((history, turns, before, edits)) => {
+                        this.remember_session_edits(edits);
                         this.settings.turns = turns.clone();
                         let pager = this.history_pager();
                         this.transcript.update(cx, |view, cx| {
@@ -158,7 +167,7 @@ impl Conversation {
                             view.set_history_pager(before, Some(pager));
                         });
                         this.history_unloaded = false;
-                        this.sync_review(cx);
+                        this.refresh_review(cx);
                         this.status = "Ready".into();
                         if let Some((row, query)) = this.pending_search.take() {
                             this.reveal_search(row, query, cx);
@@ -183,6 +192,49 @@ mod tests {
     use gpui::TestAppContext;
     use monocode_core::{store::Store, transcript::Row};
     use std::sync::Mutex;
+
+    #[gpui::test]
+    fn history_reload_restores_new_edits_and_keeps_live_settings(cx: &mut TestAppContext) {
+        let mut store = Store::open(Path::new(":memory:")).unwrap();
+        let mut session = store.create("codex", "/project").unwrap();
+        session.provider = "fixture".into();
+        let session_id = session.id;
+        let mut history = monocode_core::transcript::Transcript::default();
+        history.begin("user");
+        history.append("Edit source.rs");
+        store.write_rows(session_id, 0, &history.rows).unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let chat = cx.new(|cx| Conversation::new(session, store.clone(), cx));
+        chat.update(cx, |chat, cx| chat.load(cx));
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            chat.transcript
+                .update(cx, |view, cx| view.visible(false, cx));
+            assert!(chat.unload_history(cx), "{}", chat.status);
+            chat.settings.revision = 17;
+            chat.settings.model = Some("live-model".into());
+            chat.input
+                .update(cx, |input, cx| input.set_text("Unsent draft".into(), cx));
+        });
+        let mut edit = monocode_core::tool::ToolCall::new("edit", "Edit source.rs");
+        edit.state = monocode_core::tool::ToolState::Completed;
+        edit.input = serde_json::json!({"file_path":"/project/source.rs"}).to_string();
+        let from = history.begin("tool");
+        history.append(&serde_json::to_string(&edit).unwrap());
+        locked(&store)
+            .unwrap()
+            .write_rows(session_id, from, &history.rows[from..])
+            .unwrap();
+        chat.update(cx, |chat, cx| chat.reload_history(cx));
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            assert!(chat.history_loaded(), "{}", chat.status);
+            assert_eq!(chat.session_edits, ["/project/source.rs"]);
+            assert_eq!(chat.settings.revision, 17);
+            assert_eq!(chat.settings.model.as_deref(), Some("live-model"));
+            assert_eq!(chat.input.read(cx).content, "Unsent draft");
+        });
+    }
 
     #[gpui::test]
     fn history_eviction_keeps_live_state_and_pins_drafts_running_and_failed_saves(

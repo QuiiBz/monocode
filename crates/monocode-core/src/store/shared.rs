@@ -154,22 +154,51 @@ fn turn_start(block: &Value) -> Option<u64> {
 pub(super) fn project_turns(
     blocks: &[Value],
 ) -> Result<HashMap<usize, crate::agent::TurnInfo>, String> {
-    let mut turns = HashMap::new();
-    let mut offset = 0;
-    let mut root_turn = None;
-    for block in blocks {
-        let rows = blocks::project(std::slice::from_ref(block))?;
+    Ok(HistoryMetadata::from_blocks(blocks)?.turns)
+}
+
+#[derive(Default)]
+struct HistoryMetadata {
+    turns: HashMap<usize, crate::agent::TurnInfo>,
+    root_turn: Option<usize>,
+    operator_enabled: bool,
+}
+
+impl HistoryMetadata {
+    fn from_blocks(blocks: &[Value]) -> Result<Self, String> {
+        let mut metadata = Self::default();
+        let mut offset = 0;
+        for block in blocks {
+            let rows = blocks::project(std::slice::from_ref(block))?;
+            metadata.push(block, &rows, offset);
+            offset += rows.len();
+        }
+        Ok(metadata)
+    }
+
+    fn push(&mut self, block: &Value, rows: &[Row], offset: usize) {
+        self.operator_enabled |= block["role"] == "user"
+            && block["draft"] != true
+            && block["internal"] != true
+            && (block["monocode"] == true
+                || ["mono", "monocode"].into_iter().any(|command| {
+                    crate::composer::consume_command(
+                        block["text"].as_str().unwrap_or_default(),
+                        command,
+                    )
+                    .is_some()
+                }));
         if let Some(prompt) = rows.iter().rposition(Row::is_prompt) {
             let model = &block["turnModel"];
             let duration = block["durationMs"].as_u64();
             let started_at = turn_start(block);
             let turn = offset + prompt + 1;
             if started_at.is_some() {
-                root_turn = Some(turn);
+                self.root_turn = Some(turn);
             }
             let joined_turn =
                 (block["role"] == "user" && block["sentAt"].is_number() && started_at.is_none())
-                    .then_some(root_turn)
+                    .then_some(self.root_turn)
                     .flatten();
             let metrics = block
                 .get("turnMetrics")
@@ -182,7 +211,7 @@ pub(super) fn project_turns(
                 || block["providerTurnId"].is_string()
                 || joined_turn.is_some()
             {
-                turns.insert(
+                self.turns.insert(
                     offset + prompt + 1,
                     crate::agent::TurnInfo {
                         joined_turn,
@@ -202,9 +231,43 @@ pub(super) fn project_turns(
                 );
             }
         }
-        offset += rows.len();
     }
-    Ok(turns)
+
+    fn apply(self, settings: &mut Settings) {
+        settings.operator_enabled |= self.operator_enabled;
+        for (turn, source) in self.turns {
+            let info = settings.turns.entry(turn).or_default();
+            if !source.provider.is_empty() {
+                info.provider = source.provider;
+            }
+            if !source.model.is_empty() {
+                info.model = source.model;
+            }
+            if source.model_id.is_some() {
+                info.model_id = source.model_id;
+            }
+            if source.provider_turn_id.is_some() {
+                info.provider_turn_id = source.provider_turn_id;
+            }
+            if source.service_tier.is_some() {
+                info.service_tier = source.service_tier;
+            }
+            if source.joined_turn.is_some() {
+                info.joined_turn = source.joined_turn;
+            }
+            if source.duration_known {
+                info.duration_ms = source.duration_ms;
+                info.duration_known = true;
+            }
+            if source.started_at.is_some() {
+                info.started_at = source.started_at;
+                info.completed_at = source.completed_at;
+            }
+            if source.metrics.is_some() {
+                info.metrics = source.metrics;
+            }
+        }
+    }
 }
 
 impl Store {
@@ -633,6 +696,13 @@ impl Store {
         ))
     }
     pub(super) fn shared_agent(&self, id: i64) -> Result<Option<Settings>, String> {
+        let Some(mut settings) = self.shared_agent_metadata(id)? else {
+            return Ok(None);
+        };
+        HistoryMetadata::from_blocks(&self.shared_blocks(id)?)?.apply(&mut settings);
+        Ok(Some(settings))
+    }
+    fn shared_agent_metadata(&self, id: i64) -> Result<Option<Settings>, String> {
         let fields = ["harness", "model", "model_settings", "runtime_mode"]
             .into_iter()
             .map(str::to_owned)
@@ -730,54 +800,6 @@ impl Store {
         settings.worktree_cwd = cwd;
         settings.worktree_removed = removed.unwrap_or(false);
         settings.account.id = account.unwrap_or_else(|| crate::accounts::DEFAULT.into());
-        // Desktop blocks are authoritative. Native-only legacy metadata remains
-        // available, but cannot override a saved desktop turn's identity/time.
-        let blocks = self.shared_blocks(id)?;
-        settings.operator_enabled |= blocks.iter().any(|block| {
-            block["role"] == "user"
-                && block["draft"] != true
-                && block["internal"] != true
-                && (block["monocode"] == true
-                    || ["mono", "monocode"].into_iter().any(|command| {
-                        crate::composer::consume_command(
-                            block["text"].as_str().unwrap_or_default(),
-                            command,
-                        )
-                        .is_some()
-                    }))
-        });
-        for (turn, source) in project_turns(&blocks)? {
-            let info = settings.turns.entry(turn).or_default();
-            if !source.provider.is_empty() {
-                info.provider = source.provider;
-            }
-            if !source.model.is_empty() {
-                info.model = source.model;
-            }
-            if source.model_id.is_some() {
-                info.model_id = source.model_id;
-            }
-            if source.provider_turn_id.is_some() {
-                info.provider_turn_id = source.provider_turn_id;
-            }
-            if source.service_tier.is_some() {
-                info.service_tier = source.service_tier;
-            }
-            if source.joined_turn.is_some() {
-                info.joined_turn = source.joined_turn;
-            }
-            if source.duration_known {
-                info.duration_ms = source.duration_ms;
-                info.duration_known = true;
-            }
-            if source.started_at.is_some() {
-                info.started_at = source.started_at;
-                info.completed_at = source.completed_at;
-            }
-            if source.metrics.is_some() {
-                info.metrics = source.metrics;
-            }
-        }
         Ok(Some(settings))
     }
     pub(super) fn shared_save_agent(&self, id: i64, settings: &Settings) -> Result<(), String> {
@@ -1000,7 +1022,29 @@ impl Store {
             parse(&raw)
         }
     }
+    pub(super) fn shared_load_session(&self, id: i64) -> Result<super::LoadedSession, String> {
+        let mut settings = self.shared_agent_metadata(id);
+        let history =
+            self.shared_load_history(id, settings.as_mut().ok().and_then(Option::as_mut))?;
+        Ok(super::LoadedSession { history, settings })
+    }
     pub(super) fn shared_load(&self, id: i64) -> Result<Transcript, String> {
+        self.shared_load_history(id, None)
+    }
+    fn shared_load_history(
+        &self,
+        id: i64,
+        settings: Option<&mut Settings>,
+    ) -> Result<Transcript, String> {
+        let mut metadata = settings.as_ref().map(|_| HistoryMetadata::default());
+        let mut project = |block: &Value, rows: &mut Vec<Row>| -> Result<(), String> {
+            let projected = blocks::project(std::slice::from_ref(block))?;
+            if let Some(metadata) = metadata.as_mut() {
+                metadata.push(block, &projected, rows.len());
+            }
+            rows.extend(projected);
+            Ok(())
+        };
         let original = self.persisted_session_id(id)?;
         if let Some(from) = self.shared_window(id, &original)? {
             // Project one source block at a time. A long Mono must not retain
@@ -1022,7 +1066,7 @@ impl Store {
                 let raw: String = sql(record.get(0))?;
                 let block: Value = parse(&raw)?;
                 HistoryRevision::push(&mut digest, &block);
-                rows.extend(blocks::project(std::slice::from_ref(&block))?);
+                project(&block, &mut rows)?;
             }
             self.shared
                 .as_ref()
@@ -1030,16 +1074,25 @@ impl Store {
                 .snapshots
                 .borrow_mut()
                 .insert(id, HistoryRevision(digest.finalize().into()));
+            if let (Some(metadata), Some(settings)) = (metadata, settings) {
+                metadata.apply(settings);
+            }
             return Ok(Transcript { rows });
         }
         let blocks = self.shared_blocks(id)?;
-        let rows = blocks::project(&blocks)?;
+        let mut rows = Vec::new();
+        for block in &blocks {
+            project(block, &mut rows)?;
+        }
         self.shared
             .as_ref()
             .unwrap()
             .snapshots
             .borrow_mut()
             .insert(id, HistoryRevision::of(&blocks));
+        if let (Some(metadata), Some(settings)) = (metadata, settings) {
+            metadata.apply(settings);
+        }
         Ok(Transcript { rows })
     }
     pub(super) fn shared_store_blocks(&self, id: i64, blocks: &[Value]) -> Result<(), String> {

@@ -159,11 +159,6 @@ impl Conversation {
     pub(super) fn collect_session_edits(&mut self, cx: &mut Context<Self>) {
         let paths = crate::runtime::edited_paths(self.transcript.read(cx).source_rows());
         self.remember_session_edits(paths);
-        if self.review.read(cx).session().1 != self.execution_cwd() {
-            self.session_git = Default::default();
-            self.session_unpushed = false;
-        }
-        self.refresh_git_actions(cx);
     }
     /// Recheck only this conversation's files, also when Git changes outside
     /// a turn. A late read must never publish into another working copy.

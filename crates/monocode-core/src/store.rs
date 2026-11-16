@@ -56,6 +56,13 @@ pub struct Store {
     path: std::path::PathBuf,
     shared: Option<shared::Shared>,
 }
+
+pub struct LoadedSession {
+    pub history: Transcript,
+    // Invalid settings must not prevent saved messages from being displayed.
+    pub settings: Result<Option<crate::agent::Settings>, String>,
+}
+
 impl Store {
     pub fn reset_provider_id_if(&self, id: i64, expected: Option<&str>) -> Result<(), String> {
         if self.shared.is_some() {
@@ -708,6 +715,17 @@ impl Store {
         }
         self.shared_load_before(session, before, all)
     }
+    pub fn load_session(&self, session: i64) -> Result<LoadedSession, String> {
+        if self.shared.is_some() && self.remote_session(session)?.is_none() {
+            return self.shared_load_session(session);
+        }
+        let settings = self.agent_settings(session);
+        Ok(LoadedSession {
+            history: self.load(session)?,
+            settings,
+        })
+    }
+
     pub fn load(&self, session: i64) -> Result<Transcript, String> {
         if let Some(remote) = self.remote_session(session)? {
             let Some(id) = remote.session_id.as_deref() else {

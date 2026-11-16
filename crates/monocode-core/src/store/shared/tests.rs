@@ -32,6 +32,16 @@ fn desktop_operator_access_restores_only_from_submitted_user_messages() {
             store.agent_settings(id).unwrap().unwrap().operator_enabled,
             enabled
         );
+        assert_eq!(
+            store
+                .load_session(id)
+                .unwrap()
+                .settings
+                .unwrap()
+                .unwrap()
+                .operator_enabled,
+            enabled
+        );
     }
 }
 
@@ -85,7 +95,7 @@ fn streamed_indexed_mono_load_preserves_projection_and_revision_guards() {
             .execute("INSERT INTO mono_transcripts VALUES(?1)", [&original])
             .unwrap();
         store.shared_store_blocks(id, &blocks).unwrap();
-        let mut loaded = store.load(id).unwrap();
+        let mut loaded = store.load_session(id).unwrap().history;
         assert_eq!(loaded.rows, blocks::project(&blocks).unwrap());
         assert_eq!(
             store.shared.as_ref().unwrap().snapshots.borrow()[&id],
@@ -163,10 +173,11 @@ fn a_long_indexed_mono_opens_on_its_newest_turns_and_pages_older_ones() {
     let mut store = Store::open_monocode(Path::new(":memory:")).unwrap();
     let (id, _, blocks) = indexed_mono(&mut store, 25);
 
-    let window = store.load(id).unwrap();
+    let loaded = store.load_session(id).unwrap();
+    let window = loaded.history;
     assert_eq!(window.rows, blocks::project(&blocks[30..]).unwrap());
     assert_eq!(window.rows[0].text, "Question 15");
-    let turns = store.agent_settings(id).unwrap().unwrap().turns;
+    let turns = loaded.settings.unwrap().unwrap().turns;
     assert!(turns.contains_key(&1), "receipts count from the window");
     assert_eq!(turns[&1].started_at, Some(15));
 
@@ -507,6 +518,80 @@ fn saved(store: &Store, blocks: Value) -> (i64, String) {
         .find(|s| store.persisted_session_id(s.id).unwrap() == original)
         .unwrap();
     (session.id, original.into())
+}
+
+#[test]
+fn combined_session_load_reads_history_once_and_preserves_joined_turns() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let store = Store::open_monocode(Path::new(":memory:")).unwrap();
+    let (id, _) = saved(
+        &store,
+        json!([
+            {"role":"user","text":"/mono Begin","startedAt":100,
+             "noteCard":{"id":"context","title":"Context"}},
+            {"role":"assistant","text":"Working"},
+            {"role":"user","text":"Continue","sentAt":110},
+            {"role":"tool","text":"Read file","tool":{"callId":"read","kind":"read",
+             "title":"Read file","status":"completed","input":"{}","output":"contents"}}
+        ]),
+    );
+    let expected_history = store.load(id).unwrap();
+    let expected_settings = serde_json::to_value(store.agent_settings(id).unwrap()).unwrap();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let history_reads = reads.clone();
+    store
+        .conn
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Read {
+                    table_name: "sessions",
+                    column_name: "blocks_json"
+                }
+            ) {
+                history_reads.fetch_add(1, Ordering::Relaxed);
+            }
+            Authorization::Allow
+        }))
+        .unwrap();
+    let loaded = store.load_session(id).unwrap();
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+    assert_eq!(loaded.history.rows, expected_history.rows);
+    let settings = loaded.settings.unwrap().unwrap();
+    assert!(settings.operator_enabled);
+    assert_eq!(
+        serde_json::to_value(Some(&settings)).unwrap(),
+        expected_settings
+    );
+    let steer = loaded
+        .history
+        .rows
+        .iter()
+        .position(|row| row.text == "Continue")
+        .unwrap()
+        + 1;
+    assert_eq!(settings.turns[&steer].joined_turn, Some(1));
+}
+
+#[test]
+fn combined_session_load_keeps_history_when_settings_are_invalid() {
+    let store = Store::open_monocode(Path::new(":memory:")).unwrap();
+    let (id, original) = saved(&store, json!([{"role":"user","text":"Saved prompt"}]));
+    store
+        .conn
+        .execute(
+            "UPDATE sessions SET model_settings='invalid' WHERE id=?1",
+            [original],
+        )
+        .unwrap();
+    let loaded = store.load_session(id).unwrap();
+    assert!(loaded.settings.is_err());
+    assert_eq!(loaded.history.rows[0].text, "Saved prompt");
 }
 
 #[test]
@@ -987,6 +1072,12 @@ fn desktop_turn_receipts_restore_exact_model_timing_metrics_and_projected_offset
         .unwrap();
     let history = store.load(id).unwrap();
     let settings = store.agent_settings(id).unwrap().unwrap();
+    let loaded = store.load_session(id).unwrap();
+    assert_eq!(loaded.history.rows, history.rows);
+    assert_eq!(
+        serde_json::to_value(loaded.settings.unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&settings).unwrap()
+    );
     let first = history
         .rows
         .iter()

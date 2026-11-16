@@ -729,24 +729,27 @@ impl Conversation {
         let id = self.summary.id;
         let mono = self.settings.mono.is_some();
         let work = cx.background_executor().spawn(async move {
-            let settings = locked(&store).and_then(|s| s.agent_settings(id));
+            let loaded = locked(&store).and_then(|store| {
+                let loaded = store.load_session(id)?;
+                let edits = if mono {
+                    Vec::new()
+                } else {
+                    git_actions::restored_session_edits(&store, id, &loaded.history.rows)?
+                };
+                Ok((loaded, edits))
+            });
+            let (history, settings) = match loaded {
+                Ok((loaded, edits)) => (
+                    Ok((
+                        crate::transcript::PreparedHistory::new(loaded.history.rows, mono),
+                        edits,
+                    )),
+                    loaded.settings,
+                ),
+                Err(error) => (Err(error), Ok(None)),
+            };
             (
-                locked(&store)
-                    .and_then(|s| {
-                        let history = s.load(id)?;
-                        let edits = if mono {
-                            Vec::new()
-                        } else {
-                            git_actions::restored_session_edits(&s, id, &history.rows)?
-                        };
-                        Ok((history, edits))
-                    })
-                    .map(|(history, edits)| {
-                        (
-                            crate::transcript::PreparedHistory::new(history.rows, mono),
-                            edits,
-                        )
-                    }),
+                history,
                 settings,
                 locked(&store).and_then(|s| s.context_usage(id)),
                 locked(&store).and_then(|s| s.follow_ups(id)),
@@ -819,7 +822,7 @@ impl Conversation {
                         if let Some((row, query)) = this.pending_search.take() {
                             this.reveal_search(row, query, cx);
                         }
-                        this.sync_review(cx);
+                        this.refresh_review(cx);
                         this.run_history_actions(cx);
                         this.pump_follow_ups(cx);
                     }
@@ -1815,11 +1818,21 @@ impl Conversation {
     }
     /// The review card follows the checkout and rereads its recorded turn.
     pub(crate) fn sync_review(&mut self, cx: &mut Context<Self>) {
+        if self.settings.mono.is_none() && !self.is_remote() {
+            self.collect_session_edits(cx);
+        }
+        self.refresh_review(cx);
+    }
+    fn refresh_review(&mut self, cx: &mut Context<Self>) {
         self.sync_tool_paths(cx);
         if self.settings.mono.is_some() || self.is_remote() {
             return;
         }
-        self.collect_session_edits(cx);
+        if self.review.read(cx).session().1 != self.execution_cwd() {
+            self.session_git = Default::default();
+            self.session_unpushed = false;
+        }
+        self.refresh_git_actions(cx);
         let cwd = self.execution_cwd().to_owned();
         self.review.update(cx, |review, cx| {
             if review.session().1 == cwd {
