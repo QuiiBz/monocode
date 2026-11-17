@@ -25,7 +25,9 @@ pub(super) fn estimate_for_tier(
         .strip_suffix("-fast")
         .map_or((model, false), |model| (model, true));
     let rates = match (family, model) {
-        ("codex", "gpt-6.1-sol") => [2., 0.10, 2.50, 10.],
+        // GPT-6.2 rates verified against OPENAI_SOURCE on 2026-11-17.
+        ("codex", "gpt-6.1-sol" | "gpt-6.2-sol") => [2., 0.10, 2.50, 10.],
+        ("codex", "gpt-6.2-astra") => [8., 0.40, 10., 40.],
         ("codex", "gpt-6.1-terra") => [1., 0.05, 1.25, 5.],
         ("codex", "gpt-6-astra") => [10., 1., 12.50, 50.],
         ("codex", "gpt-6-luna") => [0.10, 0.01, 0.125, 0.50],
@@ -47,7 +49,8 @@ pub(super) fn estimate_for_tier(
             }
         }
         Some("fast" | "priority") if supports_fast => 2.,
-        Some("flex" | "batch") if !fast_alias => 0.5,
+        Some("batch") if !fast_alias => 0.5,
+        Some("flex") if !fast_alias && !matches!(model, "gpt-6.2-sol" | "gpt-6.2-astra") => 0.5,
         Some("ultrafast")
             if !fast_alias
                 && family == "codex"
@@ -58,6 +61,11 @@ pub(super) fn estimate_for_tier(
         _ => return [None; 4],
     };
     std::array::from_fn(|index| {
+        // Turn totals cannot identify request context length or cache retention.
+        // Use base rates; leave new cache writes unpriced without retention data.
+        if index == 2 && matches!(model, "gpt-6.2-sol" | "gpt-6.2-astra") && parts[index] > 0 {
+            return None;
+        }
         if index == 2 && provider == "claude" && parts[index] > 0 {
             return None;
         }
