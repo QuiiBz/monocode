@@ -126,6 +126,44 @@ fn pending_work_carries_into_later_turns_until_kept_undone_or_committed() {
 }
 
 #[test]
+fn carries_many_files_and_compares_their_filtered_contents() {
+    let f = Fixture::new();
+    f.write(".gitattributes", "*.txt text eol=lf\n");
+    f.store.begin_turn("session", f.cwd(), "first").unwrap();
+    f.write("a.txt", "agent\r\n");
+    std::fs::remove_file(f.repo.join("delete.txt")).unwrap();
+    let paths: Vec<_> = (0..130)
+        .map(|index| format!("generated/file {index:03}.txt"))
+        .collect();
+    for path in &paths {
+        f.write(path, "agent\r\n");
+    }
+    f.store.finish_turn("session", f.cwd(), "first").unwrap();
+
+    f.write("a.txt", "original\r\n");
+    std::fs::remove_file(f.repo.join(&paths[0])).unwrap();
+    f.store.begin_turn("session", f.cwd(), "second").unwrap();
+    f.store.finish_turn("session", f.cwd(), "second").unwrap();
+    f.write(&paths[1], "later edit\n");
+    f.write(&paths[65], "agent\n");
+
+    let status = f.store.status("session", f.cwd()).unwrap();
+    assert_eq!(status.files.len(), paths.len());
+    assert_eq!(status.files[0].relative, "delete.txt");
+    assert_eq!(status.files[0].status, "deleted");
+    assert_eq!(
+        status.files[1..]
+            .iter()
+            .map(|file| (file.relative.as_str(), file.undoable))
+            .collect::<Vec<_>>(),
+        paths[1..]
+            .iter()
+            .map(|path| (path.as_str(), path != &paths[1]))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn files_discarded_outside_the_app_leave_the_review_for_good() {
     let f = Fixture::new();
     f.store.begin_turn("session", f.cwd(), "first").unwrap();

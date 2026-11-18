@@ -6,7 +6,7 @@
 //! without inferring which process owns individual lines. Synchronous: callers
 //! run these on a background executor.
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -216,7 +216,7 @@ impl Store {
         // this turn's baseline, so the review covers the session until it is
         // kept, undone or committed. Every other file starts fresh.
         let carried = if pending.is_none() {
-            self.pending_baseline(session_id, cwd, &review)
+            self.pending_baseline(&review)
         } else {
             Carried::default()
         };
@@ -318,30 +318,31 @@ impl Store {
 
     /// The previous turn's still-pending files with their contents before it,
     /// as its review shows them: not kept, undone or committed.
-    fn pending_baseline(&self, session_id: &str, cwd: &str, review: &TurnReview) -> Carried {
-        let Some(previous) = review.latest.as_ref().filter(|_| review.active.is_none()) else {
+    fn pending_baseline(&self, review: &TurnReview) -> Carried {
+        let Ok(previous) = completed_turn(review) else {
             return Carried::default();
         };
-        let Ok(Some(status)) = self.turn_status_inner(session_id, cwd, false) else {
+        let root = Path::new(&review.cwd);
+        let Ok(recorded) = changes(root, previous) else {
             return Carried::default();
         };
-        let pending: HashSet<_> = status.files.iter().map(|f| f.relative.as_str()).collect();
-        let Ok(recorded) = changes(Path::new(&review.cwd), previous) else {
+        let head = checkpoint_head(root);
+        let Ok(resolved) = resolved_paths(root, previous, &recorded, head.as_deref()) else {
             return Carried::default();
         };
         let files: Vec<_> = recorded
             .into_iter()
-            .filter(|change| pending.contains(change.relative.as_str()))
+            .filter(|change| is_pending(previous, change) && !resolved.contains(&change.relative))
             .map(|change| (change.relative, change.before))
+            .collect();
+        let edited = files
+            .iter()
+            .filter(|(path, _)| previous.edited.contains(path))
+            .map(|(path, _)| path.clone())
             .collect();
         Carried {
             shared: previous.shared && !files.is_empty(),
-            edited: previous
-                .edited
-                .iter()
-                .filter(|path| pending.contains(path.as_str()))
-                .cloned()
-                .collect(),
+            edited,
             files,
         }
     }
@@ -524,24 +525,9 @@ impl Store {
         };
         let turn = completed_turn(&review)?;
         let root = PathBuf::from(&review.cwd);
-        let head = run_git(&root, &["rev-parse", "--verify", "HEAD"])
-            .ok()
-            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string());
+        let head = checkpoint_head(&root);
         let recorded = changes(&root, turn)?;
-        let mut resolved = resolved_turn_paths(&root, turn, &recorded, head.as_deref())?;
-        // Discarded outside the app, as from the changes panel: the file is
-        // back to its contents before the session, so nothing is pending.
-        resolved.extend(
-            recorded
-                .iter()
-                .filter(|change| {
-                    !turn.dismissed.contains(&change.relative)
-                        && !resolved.contains(&change.relative)
-                        && reverted(&root, change)
-                })
-                .map(|change| change.relative.clone())
-                .collect::<Vec<_>>(),
-        );
+        let resolved = resolved_paths(&root, turn, &recorded, head.as_deref())?;
         if !resolved.is_empty() {
             // Dismiss accepted work durably so later edits cannot resurrect
             // this turn's card. Its saved snapshots remain available to review.
@@ -551,25 +537,45 @@ impl Store {
             }
         }
         let turn = completed_turn(&review)?;
+        let pending: Vec<_> = recorded
+            .iter()
+            .filter(|change| is_pending(turn, change))
+            .collect();
+        if pending.is_empty() {
+            return Ok(Some(CheckpointStatus::default()));
+        }
         let can_restore =
             !turn.shared && head == turn.head && self.active_turns(&root, session_id)?.is_empty();
-        let files = recorded
+        let undoable = if can_restore {
+            matching_workspace_paths(
+                &root,
+                pending
+                    .iter()
+                    .copied()
+                    .filter(|change| has_restore_modes(change)),
+                |change| change.after.as_ref(),
+            )
+        } else {
+            HashSet::new()
+        };
+        let mut stats = line_counts(&root, turn)?;
+        let files = pending
             .into_iter()
-            .filter(|change| !turn.dismissed.contains(&change.relative))
-            .filter(|change| !turn.shared || turn.edited.contains(&change.relative))
             .map(|change| {
-                let undoable = can_restore && restorable(&root, &change);
-                CheckpointFile {
+                let (additions, deletions) = stats
+                    .remove(change.relative.as_bytes())
+                    .ok_or("Missing checkpoint line counts")?;
+                Ok(CheckpointFile {
                     path: path_to_js(&root.join(&change.relative)),
-                    relative: change.relative,
-                    status: change.status,
-                    additions: change.additions,
-                    deletions: change.deletions,
+                    relative: change.relative.clone(),
+                    status: change.status.clone(),
+                    additions,
+                    deletions,
                     exact: true,
-                    undoable,
-                }
+                    undoable: undoable.contains(change.relative.as_str()),
+                })
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
         Ok(Some(CheckpointStatus { files }))
     }
 
@@ -844,8 +850,6 @@ struct Change {
     before: Option<Blob>,
     after: Option<Blob>,
     status: String,
-    additions: i64,
-    deletions: i64,
 }
 
 fn turn_ref(session: &str, turn: &str, side: &str) -> String {
@@ -1001,28 +1005,32 @@ fn overlay_baseline(
 ) -> Result<String, String> {
     let index =
         PrivateIndex(std::env::temp_dir().join(format!("monocode-checkpoint-{}", unique_id())));
-    let run = |args: &[&str]| {
-        checked_output(
-            git_command(root, args)
-                .env("GIT_INDEX_FILE", &index.0)
-                .env("GIT_AUTHOR_NAME", "MonoCode")
-                .env("GIT_AUTHOR_EMAIL", "checkpoint@monocode.local")
-                .env("GIT_COMMITTER_NAME", "MonoCode")
-                .env("GIT_COMMITTER_EMAIL", "checkpoint@monocode.local"),
-        )
+    let command = |args: &[&str]| {
+        let mut command = git_command(root, args);
+        command
+            .env("GIT_INDEX_FILE", &index.0)
+            .env("GIT_AUTHOR_NAME", "MonoCode")
+            .env("GIT_AUTHOR_EMAIL", "checkpoint@monocode.local")
+            .env("GIT_COMMITTER_NAME", "MonoCode")
+            .env("GIT_COMMITTER_EMAIL", "checkpoint@monocode.local");
+        command
     };
+    let run = |args: &[&str]| checked_output(&mut command(args));
     run(&["read-tree", fresh])?;
-    for (relative, blob) in files {
-        match blob {
-            Some(blob) => run(&[
-                "update-index",
-                "--add",
-                "--cacheinfo",
-                &format!("{},{},{relative}", blob.mode, blob.oid),
-            ])?,
-            None => run(&["update-index", "--force-remove", "--", relative])?,
-        };
+    let mut updates = std::io::BufWriter::new(tempfile::tempfile().map_err(|e| e.to_string())?);
+    let zero_oid = "0".repeat(fresh.len());
+    for (relative, _) in files.iter().filter(|(_, blob)| blob.is_none()) {
+        write!(updates, "0 {zero_oid}\t{relative}\0").map_err(|e| e.to_string())?;
     }
+    for (relative, blob) in files {
+        if let Some(blob) = blob {
+            write!(updates, "{} {}\t{relative}\0", blob.mode, blob.oid)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    let mut updates = updates.into_inner().map_err(|e| e.to_string())?;
+    updates.rewind().map_err(|e| e.to_string())?;
+    checked_output(command(&["update-index", "-z", "--index-info"]).stdin(updates))?;
     let durable = [
         "-c",
         "core.fsync=objects,reference",
@@ -1050,26 +1058,36 @@ fn overlay_baseline(
     Ok(commit.trim().to_string())
 }
 
-fn changes(root: &Path, turn: &RecordedTurn) -> Result<Vec<Change>, String> {
+fn checkpoint_head(root: &Path) -> Option<String> {
+    run_git(root, &["rev-parse", "--verify", "HEAD"])
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+}
+
+fn checkpoint_diff(root: &Path, turn: &RecordedTurn, format: &str) -> Result<Vec<u8>, String> {
     let before = turn.before.as_deref().ok_or("Missing turn baseline")?;
     let after = turn.after.as_deref().ok_or("Missing turn result")?;
-    let args = [
-        "diff",
-        "--relative",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-renames",
-        "--no-abbrev",
-        "-z",
-    ];
-    let raw = run_git(
+    run_git(
         root,
-        &[args.as_slice(), &["--raw", before, after, "--", "."]].concat(),
-    )?;
-    let numstat = run_git(
-        root,
-        &[args.as_slice(), &["--numstat", before, after, "--", "."]].concat(),
-    )?;
+        &[
+            "diff",
+            "--relative",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--no-abbrev",
+            "-z",
+            format,
+            before,
+            after,
+            "--",
+            ".",
+        ],
+    )
+}
+
+fn line_counts(root: &Path, turn: &RecordedTurn) -> Result<BTreeMap<Vec<u8>, (i64, i64)>, String> {
+    let numstat = checkpoint_diff(root, turn, "--numstat")?;
     let mut stats = BTreeMap::new();
     for row in numstat
         .split(|byte| *byte == 0)
@@ -1089,6 +1107,11 @@ fn changes(root: &Path, turn: &RecordedTurn) -> Result<Vec<Change>, String> {
         };
         stats.insert(path.to_vec(), (count(additions)?, count(deletions)?));
     }
+    Ok(stats)
+}
+
+fn changes(root: &Path, turn: &RecordedTurn) -> Result<Vec<Change>, String> {
+    let raw = checkpoint_diff(root, turn, "--raw")?;
     let mut records = raw.split(|byte| *byte == 0).filter(|row| !row.is_empty());
     let mut out = Vec::new();
     while let Some(header) = records.next() {
@@ -1106,7 +1129,6 @@ fn changes(root: &Path, turn: &RecordedTurn) -> Result<Vec<Change>, String> {
                 oid: oid.into(),
             })
         };
-        let (additions, deletions) = stats.remove(path).ok_or("Missing checkpoint line counts")?;
         out.push(Change {
             relative: String::from_utf8(path.to_vec()).map_err(|e| e.to_string())?,
             before: blob(&fields[0][1..], fields[2]),
@@ -1117,12 +1139,35 @@ fn changes(root: &Path, turn: &RecordedTurn) -> Result<Vec<Change>, String> {
                 _ => "modified",
             }
             .into(),
-            additions,
-            deletions,
         });
     }
     out.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(out)
+}
+
+fn is_pending(turn: &RecordedTurn, change: &Change) -> bool {
+    !turn.dismissed.contains(&change.relative)
+        && (!turn.shared || turn.edited.contains(&change.relative))
+}
+
+fn resolved_paths(
+    root: &Path,
+    turn: &RecordedTurn,
+    recorded: &[Change],
+    head: Option<&str>,
+) -> Result<HashSet<String>, String> {
+    let mut resolved: HashSet<_> = resolved_turn_paths(root, turn, recorded, head)?
+        .into_iter()
+        .collect();
+    let reverted = matching_workspace_paths(
+        root,
+        recorded.iter().filter(|change| {
+            !turn.dismissed.contains(&change.relative) && !resolved.contains(&change.relative)
+        }),
+        |change| change.before.as_ref(),
+    );
+    resolved.extend(reverted.into_iter().map(str::to_owned));
+    Ok(resolved)
 }
 
 fn resolved_turn_paths(
@@ -1185,49 +1230,80 @@ fn git_paths(root: &Path, args: &[&str]) -> Result<HashSet<String>, String> {
         .collect()
 }
 
-/// The file is back to its recorded baseline: absent when the session
-/// created it, or a regular file with the earlier blob and mode.
-fn reverted(root: &Path, change: &Change) -> bool {
-    if path_contains_symlink(root, &change.relative) {
-        return false;
+fn matching_workspace_paths<'a>(
+    root: &Path,
+    changes: impl IntoIterator<Item = &'a Change>,
+    blob: impl Fn(&'a Change) -> Option<&'a Blob>,
+) -> HashSet<&'a str> {
+    let mut matched = HashSet::new();
+    let mut candidates = Vec::new();
+    for change in changes {
+        let relative = change.relative.as_str();
+        if path_contains_symlink(root, relative) {
+            continue;
+        }
+        let path = root.join(relative);
+        match (blob(change), std::fs::symlink_metadata(&path)) {
+            (None, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                matched.insert(relative);
+            }
+            (Some(blob), Ok(meta)) if meta.is_file() => {
+                let mode = if file_mode(&path).is_some_and(|mode| mode & 0o111 != 0) {
+                    "100755"
+                } else {
+                    "100644"
+                };
+                if mode == blob.mode {
+                    candidates.push((relative, blob.oid.as_str()));
+                }
+            }
+            _ => {}
+        }
     }
-    workspace_matches(root, &change.relative, change.before.as_ref())
+    for batch in candidates.chunks(64) {
+        match_workspace_hashes(root, batch, &mut matched);
+    }
+    matched
 }
 
-fn workspace_matches(root: &Path, relative: &str, blob: Option<&Blob>) -> bool {
-    let path = root.join(relative);
-    match (blob, std::fs::symlink_metadata(&path)) {
-        (None, Err(error)) => error.kind() == std::io::ErrorKind::NotFound,
-        (Some(blob), Ok(meta)) if meta.is_file() => {
-            if !matches!(blob.mode.as_str(), "100644" | "100755") {
-                return false;
+fn match_workspace_hashes<'a>(
+    root: &Path,
+    batch: &[(&'a str, &str)],
+    matched: &mut HashSet<&'a str>,
+) {
+    let mut args = vec!["hash-object", "--"];
+    args.extend(batch.iter().map(|(path, _)| *path));
+    if let Ok(output) = run_git(root, &args)
+        .and_then(|bytes| String::from_utf8(bytes).map_err(|error| error.to_string()))
+    {
+        let hashes = output.lines();
+        if hashes.clone().count() == batch.len() {
+            for ((path, oid), hash) in batch.iter().zip(hashes) {
+                if hash == *oid {
+                    matched.insert(path);
+                }
             }
-            let mode = if file_mode(&path).is_some_and(|mode| mode & 0o111 != 0) {
-                "100755"
-            } else {
-                "100644"
-            };
-            mode == blob.mode
-                && run_git(
-                    root,
-                    &["hash-object", &format!("--path={relative}"), "--", relative],
-                )
-                .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).trim() == blob.oid)
+            return;
         }
-        _ => false,
     }
+    if batch.len() > 1 {
+        let (first, second) = batch.split_at(batch.len() / 2);
+        match_workspace_hashes(root, first, matched);
+        match_workspace_hashes(root, second, matched);
+    }
+}
+
+fn has_restore_modes(change: &Change) -> bool {
+    [change.before.as_ref(), change.after.as_ref()]
+        .into_iter()
+        .flatten()
+        .all(|blob| matches!(blob.mode.as_str(), "100644" | "100755"))
 }
 
 fn restorable(root: &Path, change: &Change) -> bool {
-    if path_contains_symlink(root, &change.relative)
-        || [change.before.as_ref(), change.after.as_ref()]
-            .into_iter()
-            .flatten()
-            .any(|blob| !matches!(blob.mode.as_str(), "100644" | "100755"))
-    {
-        return false;
-    }
-    workspace_matches(root, &change.relative, change.after.as_ref())
+    has_restore_modes(change)
+        && matching_workspace_paths(root, [change], |change| change.after.as_ref())
+            .contains(change.relative.as_str())
 }
 
 fn read_blob(root: &Path, blob: Option<&Blob>) -> Result<FileState, String> {
