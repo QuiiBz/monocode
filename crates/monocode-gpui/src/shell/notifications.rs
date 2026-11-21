@@ -71,7 +71,9 @@ impl State {
             updater: updater::shared(store, cx),
             file_error: cx.new(|_| FileActionError::new()),
             reminder_error: None,
-            github: cx.new(|_| GithubActivity::new(HashMap::new())),
+            github: cx.new(|_| {
+                GithubActivity::new(workspace.preferences.linked_pr_notifications_after())
+            }),
             linked: HashMap::new(),
             linked_cleanup: HashMap::new(),
             linked_seen_ready: false,
@@ -1209,23 +1211,38 @@ impl Shell {
     }
 
     fn linked_activity_allowed(&self, card: &github_activity::Card) -> bool {
+        let preferences = &self.workspace.preferences;
         let project = format!(
             "repository:github.com/{}",
             card.item.repo.trim().to_lowercase()
         );
         let category = if card.item.kind == "pr" {
+            if preferences
+                .linked_pr_notifications_after()
+                .is_none_or(|after| card.updated_at <= after)
+            {
+                return false;
+            }
             "pullRequests"
         } else {
             "issues"
         };
         let occurred = u64::try_from(card.updated_at).ok();
         occurred.is_some()
-            && self.workspace.preferences.allows_notification_project(
+            && preferences.allows_notification_project(
                 &project,
                 category,
                 occurred,
                 monocode_core::time::now_ms(),
             )
+    }
+
+    pub(super) fn apply_linked_activity_preferences(&mut self, cx: &mut Context<Self>) {
+        let after = self.workspace.preferences.linked_pr_notifications_after();
+        self.notification_state
+            .github
+            .update(cx, |feed, _| feed.set_pull_requests_after(after));
+        self.sync_linked_activity(cx);
     }
 
     fn observe_linked_activity(&mut self, cx: &mut Context<Self>) {
@@ -1427,6 +1444,103 @@ impl Shell {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext};
+
+    #[gpui::test]
+    fn linked_pr_popup_and_sound_follow_preferences(cx: &mut TestAppContext) {
+        let (window, session, _) = crate::shell::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let feed = shell.notification_state.github.clone();
+                let resumed_at = shell.notification_state.linked_started_at as i64 + 3000;
+                let mut pull_request = github_activity::Card {
+                    session,
+                    item: monocode_core::session_groups::parse_github_work_item(
+                        "https://github.com/owner/repo/pull/1",
+                    )
+                    .unwrap(),
+                    title: "Pull request update".into(),
+                    state: "open".into(),
+                    updated_at: resumed_at - 2000,
+                    entries: Vec::new(),
+                    details_error: false,
+                    truncated: false,
+                };
+                let issue = github_activity::Card {
+                    session: session + 1,
+                    item: monocode_core::session_groups::parse_github_work_item(
+                        "https://github.com/owner/repo/issues/2",
+                    )
+                    .unwrap(),
+                    ..pull_request.clone()
+                };
+                let preferences = &mut shell.workspace.preferences;
+                preferences.sounds = true;
+                preferences.notifications = false;
+                crate::sound::PLAYED.with_borrow_mut(Vec::clear);
+                shell.observe_linked_activity(cx);
+                feed.update(cx, |feed, _| {
+                    feed.cards.insert(session, pull_request.clone())
+                });
+                shell.observe_linked_activity(cx);
+                assert!(shell.linked_notice(session, cx).is_some());
+                crate::sound::PLAYED.with_borrow_mut(|played| {
+                    assert_eq!(played.as_slice(), &[crate::sound::Cue::LinkedActivity]);
+                    played.clear();
+                });
+
+                shell
+                    .workspace
+                    .preferences
+                    .set_linked_pr_notifications(false, resumed_at - 1000);
+                shell.apply_linked_activity_preferences(cx);
+                assert!(shell.linked_notice(session, cx).is_none());
+                pull_request.updated_at = resumed_at - 500;
+                feed.update(cx, |feed, _| {
+                    feed.cards.insert(session, pull_request.clone());
+                    feed.cards.insert(issue.session, issue.clone());
+                });
+                shell.observe_linked_activity(cx);
+                assert!(shell.linked_notice(session, cx).is_none());
+                assert!(shell.linked_notice(issue.session, cx).is_some());
+                crate::sound::PLAYED.with_borrow_mut(|played| {
+                    assert_eq!(played.as_slice(), &[crate::sound::Cue::LinkedActivity]);
+                    played.clear();
+                });
+
+                shell
+                    .workspace
+                    .preferences
+                    .set_linked_pr_notifications(true, resumed_at);
+                shell.apply_linked_activity_preferences(cx);
+                feed.update(cx, |feed, _| {
+                    feed.cards.insert(session, pull_request.clone())
+                });
+                shell.observe_linked_activity(cx);
+                assert!(shell.linked_notice(session, cx).is_none());
+                crate::sound::PLAYED.with_borrow(|played| assert!(played.is_empty()));
+
+                pull_request.updated_at = resumed_at + 1000;
+                feed.update(cx, |feed, _| {
+                    feed.cards.insert(session, pull_request.clone())
+                });
+                shell.observe_linked_activity(cx);
+                assert!(shell.linked_notice(session, cx).is_some());
+                crate::sound::PLAYED.with_borrow_mut(|played| {
+                    assert_eq!(played.as_slice(), &[crate::sound::Cue::LinkedActivity]);
+                    played.clear();
+                });
+
+                shell.workspace.preferences.project_notifications = serde_json::json!({
+                    "repository:github.com/owner/repo": { "mutedUntil": null }
+                });
+                pull_request.updated_at += 1000;
+                feed.update(cx, |feed, _| feed.cards.insert(session, pull_request));
+                shell.observe_linked_activity(cx);
+                assert!(shell.linked_notice(session, cx).is_none());
+                crate::sound::PLAYED.with_borrow(|played| assert!(played.is_empty()));
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn completion_sound_obeys_turn_state_preferences_and_duplicates(cx: &mut TestAppContext) {

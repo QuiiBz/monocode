@@ -376,6 +376,12 @@ pub(crate) const INDEX: &[(&str, Section, &str, &str)] = &[
         "full width chat bubble message",
     ),
     (
+        "linked-pr-notifications",
+        Section::Chat,
+        "Linked pull request notifications",
+        "github pr activity review popup sounds",
+    ),
+    (
         "anchor-prompts",
         Section::Chat,
         "Anchor prompts to top",

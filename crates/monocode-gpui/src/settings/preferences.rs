@@ -61,6 +61,8 @@ pub(crate) struct Preferences {
     pub show_excluded_files: bool,
     // Chat
     pub transcript_layout: String,
+    pub linked_pr_notifications: bool,
+    pub linked_pr_notifications_resumed_at: i64,
     pub anchor_prompts: bool,
     pub paced_reveal: bool,
     /// Tool groups stay closed, even while they run, until clicked open.
@@ -160,6 +162,8 @@ impl Default for Preferences {
             review_font_size: 12.5,
             show_excluded_files: false,
             transcript_layout: "chat".into(),
+            linked_pr_notifications: true,
+            linked_pr_notifications_resumed_at: 0,
             anchor_prompts: true,
             paced_reveal: true,
             collapse_tool_groups: false,
@@ -201,6 +205,19 @@ impl Default for Preferences {
 }
 
 impl Preferences {
+    pub(crate) fn set_linked_pr_notifications(&mut self, enabled: bool, now: i64) {
+        if enabled && !self.linked_pr_notifications {
+            self.linked_pr_notifications_resumed_at =
+                now.max(self.linked_pr_notifications_resumed_at.saturating_add(1));
+        }
+        self.linked_pr_notifications = enabled;
+    }
+
+    pub(crate) fn linked_pr_notifications_after(&self) -> Option<i64> {
+        self.linked_pr_notifications
+            .then_some(self.linked_pr_notifications_resumed_at)
+    }
+
     /// "bottom", "panel" or "title".
     pub(crate) fn terminal_placement(&self) -> &str {
         match self.terminal_placement.as_str() {
@@ -301,6 +318,33 @@ impl Preferences {
         hidden.sort();
         hidden.dedup();
         hidden
+    }
+}
+
+#[cfg(test)]
+mod linked_pr_tests {
+    use super::Preferences;
+
+    #[test]
+    fn linked_pr_notifications_default_and_persist() {
+        assert!(Preferences::default().linked_pr_notifications);
+        let mut preferences: Preferences = serde_json::from_str(r#"{"idle_agents":1}"#).unwrap();
+        assert_eq!(preferences.linked_pr_notifications_after(), Some(0));
+
+        preferences.set_linked_pr_notifications(false, 100);
+        let saved = serde_json::to_string(&preferences).unwrap();
+        let mut restored: Preferences = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.linked_pr_notifications_after(), None);
+
+        restored.set_linked_pr_notifications(true, 200);
+        let saved = serde_json::to_string(&restored).unwrap();
+        let mut restored: Preferences = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.linked_pr_notifications_after(), Some(200));
+        assert_eq!(restored.idle_agents, 1);
+
+        restored.set_linked_pr_notifications(false, 200);
+        restored.set_linked_pr_notifications(true, 200);
+        assert!(restored.linked_pr_notifications_after().unwrap() > 200);
     }
 }
 

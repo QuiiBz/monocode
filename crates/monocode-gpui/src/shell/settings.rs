@@ -372,6 +372,7 @@ impl Shell {
             );
         });
         self.refresh_notification_permission();
+        self.apply_linked_activity_preferences(cx);
         self.configure_quick_composer(cx);
         // Switching search styles closes an open search of the other style.
         if self
@@ -978,6 +979,33 @@ mod tests {
             })
             .unwrap();
     }
+    #[gpui::test]
+    fn linked_pr_notifications_toggle_saves_workspace_preferences(cx: &mut TestAppContext) {
+        let (window, _, _) = window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.open_settings(Section::Chat, window, cx);
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        for enabled in [false, true] {
+            let toggle = visual
+                .debug_bounds("settings-toggle-linked-pr-notifications")
+                .unwrap();
+            visual.simulate_click(toggle.center(), Default::default());
+            visual.run_until_parked();
+            window
+                .read_with(visual, |shell, _| {
+                    assert_eq!(shell.workspace.preferences.linked_pr_notifications, enabled);
+                    let saved = locked(&shell.store).unwrap().ui_state().unwrap().unwrap();
+                    let saved: Workspace = serde_json::from_str(&saved).unwrap();
+                    assert_eq!(saved.preferences.linked_pr_notifications, enabled);
+                })
+                .unwrap();
+        }
+    }
+
     #[gpui::test]
     fn settings_tab_keeps_navigation_and_returns_to_the_same_session(cx: &mut TestAppContext) {
         cx.update(super::super::bind_keys);

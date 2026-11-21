@@ -21,6 +21,27 @@ impl SettingsView {
                 )],
             ),
             self.row(
+                Some("linked-pr-notifications"),
+                false,
+                "Linked pull request notifications",
+                Some("Show GitHub activity popups and play notification sounds for linked pull requests.".into()),
+                vec![self.toggle(
+                    "linked-pr-notifications",
+                    "Linked pull request notifications",
+                    p.linked_pr_notifications,
+                    false,
+                    cx,
+                    |this, enabled, cx| {
+                        this.update(cx, |preferences| {
+                            preferences.set_linked_pr_notifications(
+                                enabled,
+                                monocode_core::time::now_ms() as i64,
+                            )
+                        })
+                    },
+                )],
+            ),
+            self.row(
                 Some("anchor-prompts"),
                 false,
                 "Anchor prompts to top",

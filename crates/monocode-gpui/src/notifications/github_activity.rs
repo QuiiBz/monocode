@@ -168,6 +168,7 @@ pub(crate) enum GithubActivityEvent {
 pub(crate) struct GithubActivity {
     pub cards: HashMap<i64, Card>,
     seen: HashMap<i64, i64>,
+    pull_requests_after: Option<i64>,
     checked: Option<Instant>,
     checking: bool,
     /// Detail feeds by URL with the item `updated_at` they were fetched for:
@@ -177,13 +178,20 @@ pub(crate) struct GithubActivity {
 type Details = HashMap<String, (i64, Value)>;
 impl EventEmitter<GithubActivityEvent> for GithubActivity {}
 impl GithubActivity {
-    pub(crate) fn new(seen: HashMap<i64, i64>) -> Self {
+    pub(crate) fn new(pull_requests_after: Option<i64>) -> Self {
         Self {
             cards: HashMap::new(),
-            seen,
+            seen: HashMap::new(),
+            pull_requests_after,
             checked: None,
             checking: false,
             details: HashMap::new(),
+        }
+    }
+    pub(crate) fn set_pull_requests_after(&mut self, after: Option<i64>) {
+        if self.pull_requests_after != after {
+            self.pull_requests_after = after;
+            self.cards.retain(|_, card| card.item.kind != "pr");
         }
     }
     pub(crate) fn restore_seen(&mut self, seen: HashMap<i64, i64>) {
@@ -225,25 +233,36 @@ impl GithubActivity {
         self.checking = true;
         self.checked = Some(Instant::now());
         let seen = self.seen.clone();
+        let pull_requests_after = self.pull_requests_after;
         let details = std::mem::take(&mut self.details);
         let work = cx
             .background_executor()
-            .spawn(async move { fetch(sessions, &seen, details) });
+            .spawn(async move { fetch(sessions, &seen, details, pull_requests_after) });
         cx.spawn(async move |this, cx| {
             let (cards, details) = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.checking = false;
                 this.details = details;
-                // An acknowledgment made while polling must not reappear.
-                this.cards = cards
-                    .into_iter()
-                    .filter(|(id, c)| c.updated_at > *this.seen.get(id).unwrap_or(&0))
-                    .collect();
+                this.replace_cards(cards, pull_requests_after);
                 cx.emit(GithubActivityEvent::Changed);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn replace_cards(&mut self, cards: HashMap<i64, Card>, polled_after: Option<i64>) {
+        // A pending poll can finish after the PR setting changes.
+        self.cards = cards
+            .into_iter()
+            .filter(|(id, card)| {
+                card.updated_at > *self.seen.get(id).unwrap_or(&0)
+                    && (card.item.kind != "pr"
+                        || self
+                            .pull_requests_after
+                            .is_some_and(|after| polled_after == Some(after)))
+            })
+            .collect();
     }
 }
 fn timestamp(value: &str) -> i64 {
@@ -279,6 +298,15 @@ fn canonical(item: &WorkItem) -> bool {
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
         })
 }
+
+fn activity_since(item: &WorkItem, since: i64, pull_requests_after: Option<i64>) -> Option<i64> {
+    if item.kind == "pr" {
+        pull_requests_after.map(|after| since.max(after))
+    } else {
+        Some(since)
+    }
+}
+
 /// Every linked item's summary in one GraphQL request, shaped like the REST
 /// `api` summary. None if the request fails, so callers fall back to REST.
 fn summaries(items: &[(String, u64)]) -> Option<HashMap<(String, u64), Value>> {
@@ -334,24 +362,31 @@ fn fetch(
     sessions: Vec<Session>,
     seen: &HashMap<i64, i64>,
     previous: Details,
+    pull_requests_after: Option<i64>,
 ) -> (HashMap<i64, Card>, Details) {
     let mut cards = HashMap::new();
     let mut details = Details::new();
     let sessions: Vec<_> = sessions
         .into_iter()
-        .filter(|s| !s.archived && s.work_item.as_ref().is_some_and(canonical))
+        .filter_map(|session| {
+            let item = session
+                .work_item
+                .filter(|item| !session.archived && canonical(item))?;
+            let since = (session.updated_at.min(i64::MAX as u64) as i64)
+                .max(*seen.get(&session.id).unwrap_or(&0));
+            let since = activity_since(&item, since, pull_requests_after)?;
+            Some((session.id, item, since))
+        })
         .collect();
     let mut items: Vec<(String, u64)> = sessions
         .iter()
-        .filter_map(|s| s.work_item.as_ref())
-        .map(|item| (item.repo.clone(), item.number))
+        .map(|(_, item, _)| (item.repo.clone(), item.number))
         .collect();
     items.sort();
     items.dedup();
     let batched = summaries(&items);
     let mut cache: HashMap<String, Option<Value>> = HashMap::new();
-    for session in sessions {
-        let item = session.work_item.clone().unwrap();
+    for (session, item, since) in sessions {
         let base = format!(
             "repos/{}/{}s/{}",
             item.repo,
@@ -369,13 +404,11 @@ fn fetch(
             continue;
         };
         let updated_at = timestamp(body["updated_at"].as_str().unwrap_or(""));
-        let since = (session.updated_at.min(i64::MAX as u64) as i64)
-            .max(*seen.get(&session.id).unwrap_or(&0));
         if updated_at <= since {
             continue;
         }
         let mut card = Card {
-            session: session.id,
+            session,
             title: body["title"].as_str().unwrap_or("").into(),
             state: if body["merged"].as_bool() == Some(true) {
                 "merged".into()
@@ -475,4 +508,66 @@ fn fetch(
         cards.insert(card.session, card);
     }
     (cards, details)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn activity_card(session: i64, kind: &str, updated_at: i64) -> Card {
+        Card {
+            session,
+            item: WorkItem {
+                kind: kind.into(),
+                repo: "owner/repo".into(),
+                number: 1,
+                url: String::new(),
+            },
+            title: "Updated item".into(),
+            state: "open".into(),
+            updated_at,
+            entries: Vec::new(),
+            details_error: false,
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn linked_pr_poll_uses_resume_time_for_activity_and_details() {
+        let pull_request = activity_card(1, "pr", 0).item;
+        let issue = activity_card(2, "issue", 0).item;
+        assert_eq!(activity_since(&pull_request, 10, None), None);
+        assert_eq!(activity_since(&pull_request, 10, Some(20)), Some(20));
+        assert_eq!(activity_since(&pull_request, 30, Some(20)), Some(30));
+        assert_eq!(activity_since(&issue, 10, None), Some(10));
+        assert_eq!(activity_since(&issue, 10, Some(20)), Some(10));
+    }
+
+    #[test]
+    fn linked_pr_poll_drops_stale_results_and_keeps_issues() {
+        let mut feed = GithubActivity::new(Some(0));
+        let cards = HashMap::from([
+            (1, activity_card(1, "pr", 30)),
+            (2, activity_card(2, "issue", 30)),
+        ]);
+        feed.replace_cards(cards.clone(), Some(0));
+        assert_eq!(feed.cards.len(), 2);
+
+        feed.set_pull_requests_after(None);
+        assert!(!feed.cards.contains_key(&1));
+        assert!(feed.cards.contains_key(&2));
+        feed.replace_cards(cards.clone(), Some(0));
+        assert!(!feed.cards.contains_key(&1));
+        assert!(feed.cards.contains_key(&2));
+
+        feed.set_pull_requests_after(Some(20));
+        feed.replace_cards(cards.clone(), Some(0));
+        assert!(!feed.cards.contains_key(&1));
+        assert!(feed.cards.contains_key(&2));
+        feed.replace_cards(cards.clone(), None);
+        assert!(!feed.cards.contains_key(&1));
+        assert!(feed.cards.contains_key(&2));
+        feed.replace_cards(cards, Some(20));
+        assert_eq!(feed.cards.len(), 2);
+    }
 }
